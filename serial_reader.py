@@ -1,17 +1,22 @@
 import serial
+import time
 
 PORT = "/dev/ttyACM0"
 BAUD = 9600
 
+print("Opening serial...")
 ser = serial.Serial(PORT, BAUD, timeout=1)
+time.sleep(2)
 
-print("Reading from Arduino...\n")
+print("Listening... Press Ctrl+C to stop.")
 
-while True:
-    try:
+try:
+    while True:
         line = ser.readline().decode("utf-8", errors="ignore").strip()
         if line:
             print(line)
-    except KeyboardInterrupt:
-        print("\nStopped.")
-        break
+        time.sleep(0.01)
+except KeyboardInterrupt:
+    print("\nStopped.")
+finally:
+    ser.close()
