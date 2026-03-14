@@ -4,18 +4,29 @@ import time
 PORT = "/dev/ttyACM0"
 BAUD = 9600
 
-print("Opening serial...")
 ser = serial.Serial(PORT, BAUD, timeout=1)
 time.sleep(2)
 
-print("Listening... Press Ctrl+C to stop.")
+last_count = 0
+
+print("Listening for counts...")
 
 try:
     while True:
         line = ser.readline().decode("utf-8", errors="ignore").strip()
-        if line:
-            print(line)
-        time.sleep(0.01)
+
+        if not line:
+            continue
+
+        print("RAW:", line)
+
+        if line.startswith("COUNT:"):
+            count = int(line.split(":")[1].strip())
+
+            if count != last_count:
+                print("Parsed count =", count)
+                last_count = count
+
 except KeyboardInterrupt:
     print("\nStopped.")
 finally:
