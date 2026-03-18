@@ -2,7 +2,7 @@ import csv
 from datetime import datetime
 from html import escape
 
-from flask import Flask, abort, url_for
+from flask import Flask, abort, jsonify, url_for
 
 from config import LOG_FOLDER
 
@@ -33,57 +33,141 @@ def _resolve_race_file(filename):
 
     return race_file
 
+
+def _live_state_payload(state):
+    started_text = (
+        state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
+        if state.session_started_at
+        else "None"
+    )
+    elapsed_text = f"{state.session_elapsed_seconds:.1f}s" if state.session_active else "0.0s"
+
+    return {
+        "status": state.status,
+        "session_text": "RUNNING" if state.session_active else "IDLE",
+        "current_session_name": state.current_session_name,
+        "last_session_name": state.last_session_name,
+        "started_text": started_text,
+        "elapsed_text": elapsed_text,
+        "rpm_text": f"{state.rpm:.2f}",
+        "count_text": str(state.count),
+    }
+
 def create_app(state):
     app = Flask(__name__)
 
     @app.route("/")
     def home():
-        session_text = "RUNNING" if state.session_active else "IDLE"
-        status_text = escape(state.status)
+        live_state = _live_state_payload(state)
 
         current_file_text = "None"
-        if state.current_session_name:
+        if live_state["current_session_name"]:
             current_file_text = (
-                f'<a href="{url_for("view_race", filename=state.current_session_name)}">'
-                f"{escape(state.current_session_name)}</a>"
+                f'<a href="{url_for("view_race", filename=live_state["current_session_name"])}">'
+                f'{escape(live_state["current_session_name"])}</a>'
             )
 
         last_file_text = "None"
-        if state.last_session_name:
+        if live_state["last_session_name"]:
             last_file_text = (
-                f'<a href="{url_for("view_race", filename=state.last_session_name)}">'
-                f"{escape(state.last_session_name)}</a>"
+                f'<a href="{url_for("view_race", filename=live_state["last_session_name"])}">'
+                f'{escape(live_state["last_session_name"])}</a>'
             )
-
-        started_text = (
-            state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
-            if state.session_started_at
-            else "None"
-        )
-        elapsed_text = f"{state.session_elapsed_seconds:.1f}s" if state.session_active else "0.0s"
 
         return f"""
         <html>
             <head>
                 <title>Electrathon Dashboard</title>
-                <meta http-equiv="refresh" content="1">
             </head>
             <body style="font-family: Arial; text-align: center; margin-top: 60px;">
                 <h1>Electrathon Dashboard</h1>
                 <p><a href="{url_for("race_list")}">View Saved Races</a></p>
-                <p>Status: <b>{status_text}</b></p>
-                <p>Session: <b>{session_text}</b></p>
-                <p>Current Race File: <b>{current_file_text}</b></p>
-                <p>Last Race File: <b>{last_file_text}</b></p>
-                <p>Session Started: <b>{escape(started_text)}</b></p>
-                <p>Elapsed: <b>{escape(elapsed_text)}</b></p>
+                <p>Status: <b id="status-text">{escape(live_state["status"])}</b></p>
+                <p>Session: <b id="session-text">{escape(live_state["session_text"])}</b></p>
+                <p>Current Race File: <b id="current-file">{current_file_text}</b></p>
+                <p>Last Race File: <b id="last-file">{last_file_text}</b></p>
+                <p>Session Started: <b id="started-text">{escape(live_state["started_text"])}</b></p>
+                <p>Elapsed: <b id="elapsed-text">{escape(live_state["elapsed_text"])}</b></p>
                 <h2>Current RPM</h2>
-                <p style="font-size: 48px;">{state.rpm:.2f}</p>
+                <p id="rpm-text" style="font-size: 48px;">{live_state["rpm_text"]}</p>
                 <h3>Count</h3>
-                <p style="font-size: 32px;">{state.count}</p>
+                <p id="count-text" style="font-size: 32px;">{live_state["count_text"]}</p>
+                <script>
+                    const pollIntervalMs = 250;
+
+                    function updateRaceLink(elementId, filename, url) {{
+                        const target = document.getElementById(elementId);
+                        target.textContent = "";
+
+                        if (filename && url) {{
+                            const link = document.createElement("a");
+                            link.href = url;
+                            link.textContent = filename;
+                            target.appendChild(link);
+                            return;
+                        }}
+
+                        target.textContent = "None";
+                    }}
+
+                    let liveRequestInFlight = false;
+
+                    async function refreshLiveState() {{
+                        if (liveRequestInFlight) {{
+                            return;
+                        }}
+
+                        liveRequestInFlight = true;
+
+                        try {{
+                            const response = await fetch("{url_for("live_state")}", {{
+                                cache: "no-store",
+                                headers: {{ "Cache-Control": "no-cache" }}
+                            }});
+
+                            if (!response.ok) {{
+                                return;
+                            }}
+
+                            const data = await response.json();
+                            document.getElementById("status-text").textContent = data.status;
+                            document.getElementById("session-text").textContent = data.session_text;
+                            document.getElementById("started-text").textContent = data.started_text;
+                            document.getElementById("elapsed-text").textContent = data.elapsed_text;
+                            document.getElementById("rpm-text").textContent = data.rpm_text;
+                            document.getElementById("count-text").textContent = data.count_text;
+                            updateRaceLink("current-file", data.current_session_name, data.current_session_url);
+                            updateRaceLink("last-file", data.last_session_name, data.last_session_url);
+                        }} catch (error) {{
+                        }} finally {{
+                            liveRequestInFlight = false;
+                        }}
+                    }}
+
+                    refreshLiveState();
+                    setInterval(refreshLiveState, pollIntervalMs);
+                </script>
             </body>
         </html>
         """
+
+    @app.route("/api/live")
+    def live_state():
+        live_state = _live_state_payload(state)
+        live_state["current_session_url"] = (
+            url_for("view_race", filename=live_state["current_session_name"])
+            if live_state["current_session_name"]
+            else None
+        )
+        live_state["last_session_url"] = (
+            url_for("view_race", filename=live_state["last_session_name"])
+            if live_state["last_session_name"]
+            else None
+        )
+
+        response = jsonify(live_state)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.route("/races")
     def race_list():

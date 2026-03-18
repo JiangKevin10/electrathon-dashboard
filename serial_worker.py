@@ -3,6 +3,10 @@ import time
 from config import PORT, BAUD, MAGNETS_PER_REV
 from csv_logger import start_session_log, write_session_row, stop_session_log
 
+RPM_UPDATE_INTERVAL = 0.25
+LOG_WRITE_INTERVAL = 1.0
+
+
 def run_serial_worker(state):
     try:
         ser = serial.Serial(PORT, BAUD, timeout=0.1)
@@ -17,6 +21,7 @@ def run_serial_worker(state):
 
     last_rpm_count = 0
     last_rpm_time = time.monotonic()
+    last_log_time = last_rpm_time
     last_session_requested = False
 
     try:
@@ -40,6 +45,7 @@ def run_serial_worker(state):
                 start_session_log(state, now)
                 last_rpm_count = state.count
                 last_rpm_time = now
+                last_log_time = now
 
             if not state.session_requested and last_session_requested:
                 stop_session_log(state)
@@ -47,7 +53,7 @@ def run_serial_worker(state):
             if state.session_active and state.session_started_monotonic is not None:
                 state.session_elapsed_seconds = now - state.session_started_monotonic
 
-            if now - last_rpm_time >= 1.0:
+            if now - last_rpm_time >= RPM_UPDATE_INTERVAL:
                 delta_count = state.count - last_rpm_count
                 delta_time = now - last_rpm_time
 
@@ -55,6 +61,11 @@ def run_serial_worker(state):
                     state.rpm = ((delta_count / MAGNETS_PER_REV) / delta_time) * 60.0
                 else:
                     state.rpm = 0.0
+
+                last_rpm_count = state.count
+                last_rpm_time = now
+
+            if now - last_log_time >= LOG_WRITE_INTERVAL:
 
                 print(
                     f"COUNT={state.count} RPM={state.rpm:.2f} "
@@ -64,8 +75,7 @@ def run_serial_worker(state):
                 if state.session_active:
                     write_session_row(state)
 
-                last_rpm_count = state.count
-                last_rpm_time = now
+                last_log_time = now
 
             last_session_requested = state.session_requested
             time.sleep(0.01)
