@@ -1,9 +1,12 @@
+from collections import deque
+
 import serial
 import time
 from config import PORT, BAUD, MAGNETS_PER_REV
 from csv_logger import start_session_log, write_session_row, stop_session_log
 
 RPM_UPDATE_INTERVAL = 0.25
+RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
 
 
@@ -19,10 +22,10 @@ def run_serial_worker(state):
         print(state.status)
         return
 
-    last_rpm_count = 0
     last_rpm_time = time.monotonic()
     last_log_time = last_rpm_time
     last_session_requested = False
+    rpm_samples = deque([(last_rpm_time, state.count)])
 
     try:
         while True:
@@ -41,11 +44,18 @@ def run_serial_worker(state):
                 except ValueError:
                     pass
 
+            if state.count < rpm_samples[-1][1]:
+                rpm_samples.clear()
+                rpm_samples.append((now, state.count))
+                state.rpm = 0.0
+
             if state.session_requested and not last_session_requested:
                 start_session_log(state, now)
-                last_rpm_count = state.count
                 last_rpm_time = now
                 last_log_time = now
+                rpm_samples.clear()
+                rpm_samples.append((now, state.count))
+                state.rpm = 0.0
 
             if not state.session_requested and last_session_requested:
                 stop_session_log(state)
@@ -54,24 +64,23 @@ def run_serial_worker(state):
                 state.session_elapsed_seconds = now - state.session_started_monotonic
 
             if now - last_rpm_time >= RPM_UPDATE_INTERVAL:
-                delta_count = state.count - last_rpm_count
-                delta_time = now - last_rpm_time
+                rpm_samples.append((now, state.count))
+
+                while len(rpm_samples) > 1 and now - rpm_samples[0][0] > RPM_MEASUREMENT_WINDOW:
+                    rpm_samples.popleft()
+
+                oldest_time, oldest_count = rpm_samples[0]
+                delta_count = state.count - oldest_count
+                delta_time = now - oldest_time
 
                 if delta_time > 0 and delta_count >= 0:
                     state.rpm = ((delta_count / MAGNETS_PER_REV) / delta_time) * 60.0
                 else:
                     state.rpm = 0.0
 
-                last_rpm_count = state.count
                 last_rpm_time = now
 
             if now - last_log_time >= LOG_WRITE_INTERVAL:
-
-                print(
-                    f"COUNT={state.count} RPM={state.rpm:.2f} "
-                    f"SESSION={'ON' if state.session_active else 'OFF'}"
-                )
-
                 if state.session_active:
                     write_session_row(state)
 

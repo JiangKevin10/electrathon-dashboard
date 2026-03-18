@@ -1,3 +1,4 @@
+import logging
 import threading
 from shared_state import SharedState
 from serial_worker import run_serial_worker
@@ -11,4 +12,5 @@ thread.start()
 app = create_app(state)
 
 if __name__ == "__main__":
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
     app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
