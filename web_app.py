@@ -2,9 +2,11 @@ import csv
 from datetime import datetime
 from html import escape
 
-from flask import Flask, abort, jsonify, url_for
+from flask import Flask, abort, jsonify, redirect, request, url_for
 
 from config import LOG_FOLDER
+
+CLEAR_HISTORY_PASSWORD = "lymanpassword"
 
 
 def _list_race_files():
@@ -81,6 +83,30 @@ def _prepare_race_table(rows, fieldnames):
         row["timestamp"] = parsed.strftime("%H:%M:%S")
 
     return display_rows, header_labels, race_date_text
+
+
+def _clear_past_race_history(state):
+    active_race_name = state.current_session_name if state.session_active else None
+    deleted_count = 0
+    skipped_active = False
+    error_count = 0
+
+    for race_file in _list_race_files():
+        if active_race_name and race_file.name == active_race_name:
+            skipped_active = True
+            continue
+
+        try:
+            race_file.unlink()
+            deleted_count += 1
+        except OSError:
+            error_count += 1
+
+    if state.last_session_name and not (LOG_FOLDER / state.last_session_name).exists():
+        state.last_session_name = None
+        state.last_session_filename = None
+
+    return deleted_count, skipped_active, error_count
 
 def create_app(state):
     app = Flask(__name__)
@@ -201,6 +227,32 @@ def create_app(state):
     @app.route("/races")
     def race_list():
         race_files = _list_race_files()
+        clear_status = request.args.get("clear_status")
+        deleted_count = request.args.get("deleted_count", "0")
+        error_count = request.args.get("error_count", "0")
+        skipped_active = request.args.get("skipped_active") == "1"
+
+        clear_message_html = ""
+        if clear_status == "bad_password":
+            clear_message_html = """
+            <p style="padding: 12px; border: 1px solid #d44; background: #fee; color: #900;">
+                Incorrect password. Race history was not deleted.
+            </p>
+            """
+        elif clear_status == "cleared":
+            skipped_text = " The active race file was kept." if skipped_active else ""
+            clear_message_html = f"""
+            <p style="padding: 12px; border: 1px solid #3a7; background: #eefbf3; color: #174;">
+                Deleted {escape(deleted_count)} saved race file(s).{escape(skipped_text)}
+            </p>
+            """
+        elif clear_status == "partial":
+            skipped_text = " The active race file was kept." if skipped_active else ""
+            clear_message_html = f"""
+            <p style="padding: 12px; border: 1px solid #c80; background: #fff6df; color: #754c00;">
+                Deleted {escape(deleted_count)} saved race file(s), but {escape(error_count)} file(s) could not be removed.{escape(skipped_text)}
+            </p>
+            """
 
         if race_files:
             race_items = []
@@ -233,10 +285,52 @@ def create_app(state):
                 <p><a href="{url_for("home")}">Back to Dashboard</a></p>
                 <h1>Saved Races</h1>
                 <p>Folder: <code>{escape(str(LOG_FOLDER))}</code></p>
+                {clear_message_html}
+                <form method="post" action="{url_for("clear_race_history")}" style="margin: 24px 0; padding: 16px; border: 1px solid #d8d8d8; background: #f8f8f8;">
+                    <h2 style="margin-top: 0;">Clear Past Race History</h2>
+                    <p style="margin-top: 0;">
+                        This deletes saved CSV race files from <code>{escape(str(LOG_FOLDER))}</code>.
+                        If a race is currently running, that active file is kept.
+                    </p>
+                    <label for="clear-history-password"><b>Password</b></label><br>
+                    <input
+                        id="clear-history-password"
+                        type="password"
+                        name="password"
+                        required
+                        autocomplete="current-password"
+                        style="margin-top: 8px; padding: 8px; width: 280px; max-width: 100%;"
+                    ><br>
+                    <button
+                        type="submit"
+                        style="margin-top: 12px; padding: 10px 14px; border: 1px solid #b33; background: #d44; color: white; cursor: pointer;"
+                        onclick="return confirm('Delete all past race history?');"
+                    >
+                        Clear All Past Race History
+                    </button>
+                </form>
                 {race_list_html}
             </body>
         </html>
         """
+
+    @app.post("/races/clear-history")
+    def clear_race_history():
+        password = request.form.get("password", "")
+        if password != CLEAR_HISTORY_PASSWORD:
+            return redirect(url_for("race_list", clear_status="bad_password"))
+
+        deleted_count, skipped_active, error_count = _clear_past_race_history(state)
+        clear_status = "partial" if error_count else "cleared"
+        return redirect(
+            url_for(
+                "race_list",
+                clear_status=clear_status,
+                deleted_count=deleted_count,
+                error_count=error_count,
+                skipped_active="1" if skipped_active else "0",
+            )
+        )
 
     @app.route("/races/<filename>")
     def view_race(filename):
