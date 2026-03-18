@@ -1,4 +1,37 @@
-from flask import Flask
+import csv
+from datetime import datetime
+from html import escape
+
+from flask import Flask, abort, url_for
+
+from config import LOG_FOLDER
+
+
+def _list_race_files():
+    LOG_FOLDER.mkdir(parents=True, exist_ok=True)
+    return sorted(
+        [path for path in LOG_FOLDER.glob("*.csv") if path.is_file()],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _resolve_race_file(filename):
+    if "/" in filename or "\\" in filename:
+        abort(404)
+
+    race_file = (LOG_FOLDER / filename).resolve()
+    log_root = LOG_FOLDER.resolve()
+
+    try:
+        race_file.relative_to(log_root)
+    except ValueError:
+        abort(404)
+
+    if race_file.suffix.lower() != ".csv" or not race_file.is_file():
+        abort(404)
+
+    return race_file
 
 def create_app(state):
     app = Flask(__name__)
@@ -6,8 +39,22 @@ def create_app(state):
     @app.route("/")
     def home():
         session_text = "RUNNING" if state.session_active else "IDLE"
-        current_file_text = state.current_session_name if state.current_session_name else "None"
-        last_file_text = state.last_session_name if state.last_session_name else "None"
+        status_text = escape(state.status)
+
+        current_file_text = "None"
+        if state.current_session_name:
+            current_file_text = (
+                f'<a href="{url_for("view_race", filename=state.current_session_name)}">'
+                f"{escape(state.current_session_name)}</a>"
+            )
+
+        last_file_text = "None"
+        if state.last_session_name:
+            last_file_text = (
+                f'<a href="{url_for("view_race", filename=state.last_session_name)}">'
+                f"{escape(state.last_session_name)}</a>"
+            )
+
         started_text = (
             state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
             if state.session_started_at
@@ -23,16 +70,135 @@ def create_app(state):
             </head>
             <body style="font-family: Arial; text-align: center; margin-top: 60px;">
                 <h1>Electrathon Dashboard</h1>
-                <p>Status: <b>{state.status}</b></p>
+                <p><a href="{url_for("race_list")}">View Saved Races</a></p>
+                <p>Status: <b>{status_text}</b></p>
                 <p>Session: <b>{session_text}</b></p>
                 <p>Current Race File: <b>{current_file_text}</b></p>
                 <p>Last Race File: <b>{last_file_text}</b></p>
-                <p>Session Started: <b>{started_text}</b></p>
-                <p>Elapsed: <b>{elapsed_text}</b></p>
+                <p>Session Started: <b>{escape(started_text)}</b></p>
+                <p>Elapsed: <b>{escape(elapsed_text)}</b></p>
                 <h2>Current RPM</h2>
                 <p style="font-size: 48px;">{state.rpm:.2f}</p>
                 <h3>Count</h3>
                 <p style="font-size: 32px;">{state.count}</p>
+            </body>
+        </html>
+        """
+
+    @app.route("/races")
+    def race_list():
+        race_files = _list_race_files()
+
+        if race_files:
+            race_items = []
+            for race_file in race_files:
+                race_stat = race_file.stat()
+                modified_text = datetime.fromtimestamp(race_stat.st_mtime).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                race_items.append(
+                    f"""
+                    <li style="margin-bottom: 12px;">
+                        <a href="{url_for("view_race", filename=race_file.name)}">{escape(race_file.name)}</a><br>
+                        <small>
+                            Modified: {escape(modified_text)}
+                            | Size: {race_stat.st_size} bytes
+                        </small>
+                    </li>
+                    """
+                )
+            race_list_html = f'<ul style="padding-left: 20px;">{"".join(race_items)}</ul>'
+        else:
+            race_list_html = "<p>No saved races found yet.</p>"
+
+        return f"""
+        <html>
+            <head>
+                <title>Saved Races</title>
+            </head>
+            <body style="font-family: Arial; margin: 40px auto; max-width: 900px; line-height: 1.5;">
+                <p><a href="{url_for("home")}">Back to Dashboard</a></p>
+                <h1>Saved Races</h1>
+                <p>Folder: <code>{escape(str(LOG_FOLDER))}</code></p>
+                {race_list_html}
+            </body>
+        </html>
+        """
+
+    @app.route("/races/<filename>")
+    def view_race(filename):
+        race_file = _resolve_race_file(filename)
+
+        with race_file.open("r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+            fieldnames = reader.fieldnames or ["timestamp", "elapsed_seconds", "count", "rpm"]
+
+        max_rpm = 0.0
+        final_count = 0
+        duration = "0.00"
+
+        if rows:
+            duration = rows[-1].get("elapsed_seconds", "0.00")
+            try:
+                final_count = int(rows[-1].get("count", 0))
+            except (TypeError, ValueError):
+                final_count = 0
+
+            rpm_values = []
+            for row in rows:
+                try:
+                    rpm_values.append(float(row.get("rpm", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+
+            if rpm_values:
+                max_rpm = max(rpm_values)
+
+        header_html = "".join(
+            f"<th style=\"border: 1px solid #ccc; padding: 8px; background: #f3f3f3;\">{escape(column)}</th>"
+            for column in fieldnames
+        )
+
+        row_html = "".join(
+            "<tr>"
+            + "".join(
+                f"<td style=\"border: 1px solid #ccc; padding: 8px;\">{escape(row.get(column, ''))}</td>"
+                for column in fieldnames
+            )
+            + "</tr>"
+            for row in rows
+        )
+
+        if not row_html:
+            row_html = (
+                f"<tr><td colspan=\"{len(fieldnames)}\" style=\"border: 1px solid #ccc; padding: 12px;\">"
+                "This race file has no data rows yet."
+                "</td></tr>"
+            )
+
+        return f"""
+        <html>
+            <head>
+                <title>{escape(race_file.name)}</title>
+            </head>
+            <body style="font-family: Arial; margin: 40px auto; max-width: 1100px; line-height: 1.5;">
+                <p><a href="{url_for("home")}">Dashboard</a> | <a href="{url_for("race_list")}">Saved Races</a></p>
+                <h1>{escape(race_file.name)}</h1>
+                <p><b>Rows:</b> {len(rows)}</p>
+                <p><b>Duration:</b> {escape(str(duration))} seconds</p>
+                <p><b>Final Count:</b> {final_count}</p>
+                <p><b>Max RPM:</b> {max_rpm:.2f}</p>
+                <div style="overflow-x: auto;">
+                    <table style="border-collapse: collapse; width: 100%;">
+                        <thead>
+                            <tr>{header_html}</tr>
+                        </thead>
+                        <tbody>
+                            {row_html}
+                        </tbody>
+                    </table>
+                </div>
             </body>
         </html>
         """
