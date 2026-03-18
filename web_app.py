@@ -53,6 +53,35 @@ def _live_state_payload(state):
         "count_text": str(state.count),
     }
 
+
+def _prepare_race_table(rows, fieldnames):
+    display_rows = [dict(row) for row in rows]
+    header_labels = {column: column for column in fieldnames}
+    race_date_text = None
+
+    if "timestamp" not in fieldnames or not display_rows:
+        return display_rows, header_labels, race_date_text
+
+    parsed_timestamps = []
+    for row in display_rows:
+        timestamp_text = row.get("timestamp", "")
+        try:
+            parsed_timestamps.append(datetime.strptime(timestamp_text, "%Y-%m-%d %H:%M:%S"))
+        except (TypeError, ValueError):
+            return display_rows, header_labels, race_date_text
+
+    unique_dates = {parsed.date() for parsed in parsed_timestamps}
+    if len(unique_dates) != 1:
+        return display_rows, header_labels, race_date_text
+
+    race_date_text = parsed_timestamps[0].strftime("%Y-%m-%d")
+    header_labels["timestamp"] = "time"
+
+    for row, parsed in zip(display_rows, parsed_timestamps):
+        row["timestamp"] = parsed.strftime("%H:%M:%S")
+
+    return display_rows, header_labels, race_date_text
+
 def create_app(state):
     app = Flask(__name__)
 
@@ -221,6 +250,7 @@ def create_app(state):
         max_rpm = 0.0
         final_count = 0
         duration = "0.00"
+        display_rows, header_labels, race_date_text = _prepare_race_table(rows, fieldnames)
 
         if rows:
             duration = rows[-1].get("elapsed_seconds", "0.00")
@@ -240,7 +270,7 @@ def create_app(state):
                 max_rpm = max(rpm_values)
 
         header_html = "".join(
-            f"<th style=\"border: 1px solid #ccc; padding: 8px; background: #f3f3f3;\">{escape(column)}</th>"
+            f"<th style=\"border: 1px solid #ccc; padding: 8px; background: #f3f3f3;\">{escape(header_labels.get(column, column))}</th>"
             for column in fieldnames
         )
 
@@ -251,7 +281,7 @@ def create_app(state):
                 for column in fieldnames
             )
             + "</tr>"
-            for row in rows
+            for row in display_rows
         )
 
         if not row_html:
@@ -261,6 +291,10 @@ def create_app(state):
                 "</td></tr>"
             )
 
+        race_date_html = ""
+        if race_date_text:
+            race_date_html = f"<p><b>Race Date:</b> {escape(race_date_text)}</p>"
+
         return f"""
         <html>
             <head>
@@ -269,6 +303,7 @@ def create_app(state):
             <body style="font-family: Arial; margin: 40px auto; max-width: 1100px; line-height: 1.5;">
                 <p><a href="{url_for("home")}">Dashboard</a> | <a href="{url_for("race_list")}">Saved Races</a></p>
                 <h1>{escape(race_file.name)}</h1>
+                {race_date_html}
                 <p><b>Rows:</b> {len(rows)}</p>
                 <p><b>Duration:</b> {escape(str(duration))} seconds</p>
                 <p><b>Final Count:</b> {final_count}</p>
