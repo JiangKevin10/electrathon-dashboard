@@ -84,7 +84,7 @@ void sendGpsTimeState() {
   Serial.println(gps.time.second());
 }
 
-void sendPpsState(unsigned long nowMicros) {
+void sendPpsState() {
   unsigned long pulseCountSnapshot = 0;
   unsigned long lastPulseMicrosSnapshot = 0;
 
@@ -98,6 +98,7 @@ void sendPpsState(unsigned long nowMicros) {
     return;
   }
 
+  const unsigned long nowMicros = micros();
   const unsigned long pulseAgeMs = (nowMicros - lastPulseMicrosSnapshot) / 1000UL;
   const bool ppsLocked = pulseAgeMs <= ppsLockThresholdMs;
 
@@ -106,7 +107,7 @@ void sendPpsState(unsigned long nowMicros) {
   Serial.print(",");
   Serial.print(pulseCountSnapshot);
   Serial.print(",");
-  Serial.println((long)pulseAgeMs);
+  Serial.println(pulseAgeMs);
 }
 
 void hallISR() {
@@ -160,7 +161,6 @@ void loop() {
   static unsigned long lastDashboardSendTime = 0;
   static unsigned long lastGpsSendTime = 0;
   const unsigned long now = millis();
-  const unsigned long nowMicros = micros();
 
   if (now - lastDashboardSendTime >= dashboardSendInterval) {
     Serial.print("COUNT:");
@@ -175,7 +175,7 @@ void loop() {
   if (now - lastGpsSendTime >= gpsSendInterval) {
     sendGpsState();
     sendGpsTimeState();
-    sendPpsState(nowMicros);
+    sendPpsState();
     lastGpsSendTime = now;
   }
 }
