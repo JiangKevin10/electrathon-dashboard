@@ -12,6 +12,9 @@ class SharedState:
         self.pps_locked = False
         self.pps_pulse_count = 0
         self.pps_age_ms = None
+        self.last_raw_gps_line = "Waiting for GPS serial data"
+        self.last_raw_gpstime_line = "Waiting for GPS time data"
+        self.last_raw_pps_line = "Waiting for PPS data"
         self.session_requested = False
         self.session_active = False
         self.status = "Starting..."

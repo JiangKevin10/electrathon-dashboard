@@ -45,6 +45,8 @@ def run_serial_worker(state):
                     pass
 
             elif line.startswith("GPS:"):
+                print(f"[ARDUINO] {line}")
+                state.last_raw_gps_line = line
                 gps_payload = line.split(":", 1)[1].strip()
                 if gps_payload == "NOFIX":
                     state.gps_latitude = None
@@ -63,6 +65,8 @@ def run_serial_worker(state):
                             pass
 
             elif line.startswith("GPSTIME:"):
+                print(f"[ARDUINO] {line}")
+                state.last_raw_gpstime_line = line
                 time_payload = line.split(":", 1)[1].strip()
                 if time_payload == "NOFIX":
                     state.gps_utc_date = None
@@ -74,6 +78,8 @@ def run_serial_worker(state):
                         state.gps_utc_time = time_parts[1]
 
             elif line.startswith("PPS:"):
+                print(f"[ARDUINO] {line}")
+                state.last_raw_pps_line = line
                 pps_payload = line.split(":", 1)[1].strip()
                 if pps_payload == "DISABLED":
                     state.pps_enabled = False
@@ -152,5 +158,8 @@ def run_serial_worker(state):
         state.pps_locked = False
         state.pps_pulse_count = 0
         state.pps_age_ms = None
+        state.last_raw_gps_line = "Waiting for GPS serial data"
+        state.last_raw_gpstime_line = "Waiting for GPS time data"
+        state.last_raw_pps_line = "Waiting for PPS data"
         stop_session_log(state)
         ser.close()

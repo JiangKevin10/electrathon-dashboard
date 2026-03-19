@@ -91,6 +91,9 @@ def _live_state_payload(state):
         "pps_status_text": pps_status_text,
         "pps_pulse_count_text": pps_pulse_count_text,
         "pps_age_text": pps_age_text,
+        "last_raw_gps_line": state.last_raw_gps_line,
+        "last_raw_gpstime_line": state.last_raw_gpstime_line,
+        "last_raw_pps_line": state.last_raw_pps_line,
     }
 
 
@@ -193,6 +196,10 @@ def create_app(state):
                 <p>PPS Status: <b id="pps-status-text">{escape(live_state["pps_status_text"])}</b></p>
                 <p>PPS Pulse Count: <b id="pps-pulse-count-text">{escape(live_state["pps_pulse_count_text"])}</b></p>
                 <p>Last PPS Age: <b id="pps-age-text">{escape(live_state["pps_age_text"])}</b></p>
+                <h3>Raw GPS Serial</h3>
+                <p>GPS: <code id="raw-gps-line">{escape(live_state["last_raw_gps_line"])}</code></p>
+                <p>GPSTIME: <code id="raw-gpstime-line">{escape(live_state["last_raw_gpstime_line"])}</code></p>
+                <p>PPS: <code id="raw-pps-line">{escape(live_state["last_raw_pps_line"])}</code></p>
                 <p>
                     <a
                         id="gps-map-link"
@@ -267,6 +274,9 @@ def create_app(state):
                             document.getElementById("pps-status-text").textContent = data.pps_status_text;
                             document.getElementById("pps-pulse-count-text").textContent = data.pps_pulse_count_text;
                             document.getElementById("pps-age-text").textContent = data.pps_age_text;
+                            document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
+                            document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                            document.getElementById("raw-pps-line").textContent = data.last_raw_pps_line;
                             updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                             updateRaceLink("last-file", data.last_session_name, data.last_session_url);
                             updateGpsLink(data.gps_maps_url);
