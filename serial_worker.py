@@ -44,6 +44,47 @@ def run_serial_worker(state):
                 except ValueError:
                     pass
 
+            elif line.startswith("GPS:"):
+                gps_payload = line.split(":", 1)[1].strip()
+                if gps_payload == "NOFIX":
+                    state.gps_latitude = None
+                    state.gps_longitude = None
+                    state.gps_has_fix = False
+                    state.gps_satellites = 0
+                else:
+                    gps_parts = gps_payload.split(",")
+                    if len(gps_parts) >= 3:
+                        try:
+                            state.gps_latitude = float(gps_parts[0])
+                            state.gps_longitude = float(gps_parts[1])
+                            state.gps_satellites = int(gps_parts[2])
+                            state.gps_has_fix = True
+                        except ValueError:
+                            pass
+
+            elif line.startswith("GPSTIME:"):
+                time_payload = line.split(":", 1)[1].strip()
+                if time_payload == "NOFIX":
+                    state.gps_utc_date = None
+                    state.gps_utc_time = None
+                else:
+                    time_parts = time_payload.split(",")
+                    if len(time_parts) >= 2:
+                        state.gps_utc_date = time_parts[0]
+                        state.gps_utc_time = time_parts[1]
+
+            elif line.startswith("PPS:"):
+                pps_payload = line.split(":", 1)[1].strip()
+                pps_parts = pps_payload.split(",")
+                if len(pps_parts) >= 3:
+                    try:
+                        state.pps_locked = pps_parts[0] == "1"
+                        state.pps_pulse_count = int(pps_parts[1])
+                        pps_age_ms = int(pps_parts[2])
+                        state.pps_age_ms = pps_age_ms if pps_age_ms >= 0 else None
+                    except ValueError:
+                        pass
+
             if state.count < rpm_samples[-1][1]:
                 rpm_samples.clear()
                 rpm_samples.append((now, state.count))
@@ -94,5 +135,14 @@ def run_serial_worker(state):
         print(state.status)
     finally:
         state.session_requested = False
+        state.gps_latitude = None
+        state.gps_longitude = None
+        state.gps_has_fix = False
+        state.gps_satellites = 0
+        state.gps_utc_date = None
+        state.gps_utc_time = None
+        state.pps_locked = False
+        state.pps_pulse_count = 0
+        state.pps_age_ms = None
         stop_session_log(state)
         ser.close()

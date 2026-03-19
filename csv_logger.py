@@ -18,7 +18,23 @@ def start_session_log(state, started_monotonic):
 
     csv_file = open(filename, "w", newline="", encoding="utf-8")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(["timestamp", "elapsed_seconds", "count", "rpm"])
+    csv_writer.writerow(
+        [
+            "timestamp",
+            "elapsed_seconds",
+            "count",
+            "rpm",
+            "latitude",
+            "longitude",
+            "gps_fix",
+            "gps_satellites",
+            "gps_utc_date",
+            "gps_utc_time",
+            "pps_locked",
+            "pps_pulse_count",
+            "pps_age_ms",
+        ]
+    )
 
     state.session_active = True
     state.session_started_at = started_at
@@ -37,7 +53,21 @@ def write_session_row(state):
 
     timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     csv_writer.writerow(
-        [timestamp_str, f"{state.session_elapsed_seconds:.2f}", state.count, round(state.rpm, 2)]
+        [
+            timestamp_str,
+            f"{state.session_elapsed_seconds:.2f}",
+            state.count,
+            round(state.rpm, 2),
+            f"{state.gps_latitude:.6f}" if state.gps_latitude is not None else "",
+            f"{state.gps_longitude:.6f}" if state.gps_longitude is not None else "",
+            1 if state.gps_has_fix else 0,
+            state.gps_satellites,
+            state.gps_utc_date or "",
+            state.gps_utc_time or "",
+            1 if state.pps_locked else 0,
+            state.pps_pulse_count,
+            state.pps_age_ms if state.pps_age_ms is not None else "",
+        ]
     )
     csv_file.flush()
 

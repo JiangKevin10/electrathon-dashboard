@@ -43,6 +43,31 @@ def _live_state_payload(state):
         else "None"
     )
     elapsed_text = f"{state.session_elapsed_seconds:.1f}s" if state.session_active else "0.0s"
+    gps_has_fix = (
+        state.gps_has_fix
+        and state.gps_latitude is not None
+        and state.gps_longitude is not None
+    )
+    gps_latitude_text = f"{state.gps_latitude:.6f}" if state.gps_latitude is not None else "Unknown"
+    gps_longitude_text = f"{state.gps_longitude:.6f}" if state.gps_longitude is not None else "Unknown"
+    gps_status_text = (
+        f"FIX ({state.gps_satellites} satellites)"
+        if gps_has_fix
+        else "Searching for fix"
+    )
+    gps_maps_url = (
+        f"https://www.google.com/maps?q={state.gps_latitude:.6f},{state.gps_longitude:.6f}"
+        if gps_has_fix
+        else None
+    )
+    gps_time_text = (
+        f"{state.gps_utc_date} {state.gps_utc_time} UTC"
+        if state.gps_utc_date and state.gps_utc_time
+        else "Unknown"
+    )
+    pps_status_text = "LOCKED" if state.pps_locked else "Waiting for PPS pulse"
+    pps_pulse_count_text = str(state.pps_pulse_count)
+    pps_age_text = f"{state.pps_age_ms} ms" if state.pps_age_ms is not None else "Unknown"
 
     return {
         "status": state.status,
@@ -53,6 +78,14 @@ def _live_state_payload(state):
         "elapsed_text": elapsed_text,
         "rpm_text": f"{state.rpm:.2f}",
         "count_text": str(state.count),
+        "gps_status_text": gps_status_text,
+        "gps_latitude_text": gps_latitude_text,
+        "gps_longitude_text": gps_longitude_text,
+        "gps_maps_url": gps_maps_url,
+        "gps_time_text": gps_time_text,
+        "pps_status_text": pps_status_text,
+        "pps_pulse_count_text": pps_pulse_count_text,
+        "pps_age_text": pps_age_text,
     }
 
 
@@ -147,6 +180,25 @@ def create_app(state):
                 <p id="rpm-text" style="font-size: 48px;">{live_state["rpm_text"]}</p>
                 <h3>Count</h3>
                 <p id="count-text" style="font-size: 32px;">{live_state["count_text"]}</p>
+                <h2>GPS Position</h2>
+                <p>Status: <b id="gps-status-text">{escape(live_state["gps_status_text"])}</b></p>
+                <p>Latitude: <b id="gps-latitude-text">{escape(live_state["gps_latitude_text"])}</b></p>
+                <p>Longitude: <b id="gps-longitude-text">{escape(live_state["gps_longitude_text"])}</b></p>
+                <p>GPS UTC Time: <b id="gps-time-text">{escape(live_state["gps_time_text"])}</b></p>
+                <p>PPS Status: <b id="pps-status-text">{escape(live_state["pps_status_text"])}</b></p>
+                <p>PPS Pulse Count: <b id="pps-pulse-count-text">{escape(live_state["pps_pulse_count_text"])}</b></p>
+                <p>Last PPS Age: <b id="pps-age-text">{escape(live_state["pps_age_text"])}</b></p>
+                <p>
+                    <a
+                        id="gps-map-link"
+                        href="{escape(live_state['gps_maps_url'] or '#')}"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style="display: {'inline' if live_state['gps_maps_url'] else 'none'};"
+                    >
+                        Open in Google Maps
+                    </a>
+                </p>
                 <script>
                     const pollIntervalMs = 250;
 
@@ -163,6 +215,18 @@ def create_app(state):
                         }}
 
                         target.textContent = "None";
+                    }}
+
+                    function updateGpsLink(url) {{
+                        const gpsLink = document.getElementById("gps-map-link");
+                        if (url) {{
+                            gpsLink.href = url;
+                            gpsLink.style.display = "inline";
+                            return;
+                        }}
+
+                        gpsLink.removeAttribute("href");
+                        gpsLink.style.display = "none";
                     }}
 
                     let liveRequestInFlight = false;
@@ -191,8 +255,16 @@ def create_app(state):
                             document.getElementById("elapsed-text").textContent = data.elapsed_text;
                             document.getElementById("rpm-text").textContent = data.rpm_text;
                             document.getElementById("count-text").textContent = data.count_text;
+                            document.getElementById("gps-status-text").textContent = data.gps_status_text;
+                            document.getElementById("gps-latitude-text").textContent = data.gps_latitude_text;
+                            document.getElementById("gps-longitude-text").textContent = data.gps_longitude_text;
+                            document.getElementById("gps-time-text").textContent = data.gps_time_text;
+                            document.getElementById("pps-status-text").textContent = data.pps_status_text;
+                            document.getElementById("pps-pulse-count-text").textContent = data.pps_pulse_count_text;
+                            document.getElementById("pps-age-text").textContent = data.pps_age_text;
                             updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                             updateRaceLink("last-file", data.last_session_name, data.last_session_url);
+                            updateGpsLink(data.gps_maps_url);
                         }} catch (error) {{
                         }} finally {{
                             liveRequestInFlight = false;
