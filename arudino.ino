@@ -5,12 +5,13 @@ const int hallPin = 2;
 const int gpsPpsPin = 3;
 const int buttonPin = 4;
 const int ledPin = 7;
-const int gpsRxPin = 5;
-const int gpsTxPin = 6;
+const int gpsRxPin = 10;
+const int gpsTxPin = 11;
+const bool useGpsPps = false;
 
 const unsigned long debounceDelay = 50;
 const unsigned long dashboardSendInterval = 100;
-const unsigned long gpsSendInterval = 1000;
+const unsigned long gpsNoFixReportInterval = 2000;
 const unsigned long ppsLockThresholdMs = 1500;
 
 SoftwareSerial gpsSerial(gpsRxPin, gpsTxPin);
@@ -28,9 +29,7 @@ bool stableButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 
 void sendGpsState() {
-  const bool hasFreshFix = gps.location.isValid() && gps.location.age() < 5000;
-
-  if (!hasFreshFix) {
+  if (!gps.location.isValid()) {
     Serial.println("GPS:NOFIX");
     return;
   }
@@ -44,13 +43,7 @@ void sendGpsState() {
 }
 
 void sendGpsTimeState() {
-  const bool hasFreshTime =
-    gps.date.isValid() &&
-    gps.time.isValid() &&
-    gps.date.age() < 5000 &&
-    gps.time.age() < 5000;
-
-  if (!hasFreshTime) {
+  if (!gps.date.isValid() || !gps.time.isValid()) {
     Serial.println("GPSTIME:NOFIX");
     return;
   }
@@ -85,6 +78,11 @@ void sendGpsTimeState() {
 }
 
 void sendPpsState() {
+  if (!useGpsPps) {
+    Serial.println("PPS:DISABLED");
+    return;
+  }
+
   unsigned long pulseCountSnapshot = 0;
   unsigned long lastPulseMicrosSnapshot = 0;
 
@@ -124,12 +122,14 @@ void setup() {
   gpsSerial.begin(9600);
 
   pinMode(hallPin, INPUT_PULLUP);
-  pinMode(gpsPpsPin, INPUT);
   pinMode(buttonPin, INPUT_PULLUP);
   pinMode(ledPin, OUTPUT);
 
   attachInterrupt(digitalPinToInterrupt(hallPin), hallISR, FALLING);
-  attachInterrupt(digitalPinToInterrupt(gpsPpsPin), ppsISR, RISING);
+  if (useGpsPps) {
+    pinMode(gpsPpsPin, INPUT);
+    attachInterrupt(digitalPinToInterrupt(gpsPpsPin), ppsISR, RISING);
+  }
 
   digitalWrite(ledPin, LOW);
 }
@@ -159,7 +159,7 @@ void loop() {
   lastButtonReading = reading;
 
   static unsigned long lastDashboardSendTime = 0;
-  static unsigned long lastGpsSendTime = 0;
+  static unsigned long lastGpsNoFixReportTime = 0;
   const unsigned long now = millis();
 
   if (now - lastDashboardSendTime >= dashboardSendInterval) {
@@ -172,10 +172,21 @@ void loop() {
     lastDashboardSendTime = now;
   }
 
-  if (now - lastGpsSendTime >= gpsSendInterval) {
+  if (gps.location.isUpdated()) {
     sendGpsState();
+  } else if (!gps.location.isValid() && now - lastGpsNoFixReportTime >= gpsNoFixReportInterval) {
+    Serial.println("GPS:NOFIX");
+    lastGpsNoFixReportTime = now;
+  }
+
+  if (gps.date.isUpdated() || gps.time.isUpdated()) {
     sendGpsTimeState();
+  } else if ((!gps.date.isValid() || !gps.time.isValid()) && now - lastGpsNoFixReportTime >= gpsNoFixReportInterval) {
+    Serial.println("GPSTIME:NOFIX");
+  }
+
+  if (!useGpsPps && now - lastGpsNoFixReportTime >= gpsNoFixReportInterval) {
     sendPpsState();
-    lastGpsSendTime = now;
+    lastGpsNoFixReportTime = now;
   }
 }

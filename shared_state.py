@@ -8,6 +8,7 @@ class SharedState:
         self.gps_satellites = 0
         self.gps_utc_date = None
         self.gps_utc_time = None
+        self.pps_enabled = True
         self.pps_locked = False
         self.pps_pulse_count = 0
         self.pps_age_ms = None

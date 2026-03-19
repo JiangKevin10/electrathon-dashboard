@@ -75,15 +75,22 @@ def run_serial_worker(state):
 
             elif line.startswith("PPS:"):
                 pps_payload = line.split(":", 1)[1].strip()
-                pps_parts = pps_payload.split(",")
-                if len(pps_parts) >= 3:
-                    try:
-                        state.pps_locked = pps_parts[0] == "1"
-                        state.pps_pulse_count = int(pps_parts[1])
-                        pps_age_ms = int(pps_parts[2])
-                        state.pps_age_ms = pps_age_ms if pps_age_ms >= 0 else None
-                    except ValueError:
-                        pass
+                if pps_payload == "DISABLED":
+                    state.pps_enabled = False
+                    state.pps_locked = False
+                    state.pps_pulse_count = 0
+                    state.pps_age_ms = None
+                else:
+                    state.pps_enabled = True
+                    pps_parts = pps_payload.split(",")
+                    if len(pps_parts) >= 3:
+                        try:
+                            state.pps_locked = pps_parts[0] == "1"
+                            state.pps_pulse_count = int(pps_parts[1])
+                            pps_age_ms = int(pps_parts[2])
+                            state.pps_age_ms = pps_age_ms if pps_age_ms >= 0 else None
+                        except ValueError:
+                            pass
 
             if state.count < rpm_samples[-1][1]:
                 rpm_samples.clear()
@@ -141,6 +148,7 @@ def run_serial_worker(state):
         state.gps_satellites = 0
         state.gps_utc_date = None
         state.gps_utc_time = None
+        state.pps_enabled = True
         state.pps_locked = False
         state.pps_pulse_count = 0
         state.pps_age_ms = None

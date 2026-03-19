@@ -65,9 +65,14 @@ def _live_state_payload(state):
         if state.gps_utc_date and state.gps_utc_time
         else "Unknown"
     )
-    pps_status_text = "LOCKED" if state.pps_locked else "Waiting for PPS pulse"
-    pps_pulse_count_text = str(state.pps_pulse_count)
-    pps_age_text = f"{state.pps_age_ms} ms" if state.pps_age_ms is not None else "Unknown"
+    if state.pps_enabled:
+        pps_status_text = "LOCKED" if state.pps_locked else "Waiting for PPS pulse"
+        pps_pulse_count_text = str(state.pps_pulse_count)
+        pps_age_text = f"{state.pps_age_ms} ms" if state.pps_age_ms is not None else "Unknown"
+    else:
+        pps_status_text = "PPS not connected"
+        pps_pulse_count_text = "N/A"
+        pps_age_text = "N/A"
 
     return {
         "status": state.status,
