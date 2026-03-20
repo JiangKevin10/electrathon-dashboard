@@ -1,12 +1,954 @@
 import csv
 from datetime import datetime
-from html import escape
 
-from flask import Flask, abort, jsonify, redirect, request, url_for
+from flask import (
+    Flask,
+    abort,
+    jsonify,
+    redirect,
+    render_template_string,
+    request,
+    url_for,
+)
 
 from config import LOG_FOLDER
 
 CLEAR_HISTORY_PASSWORD = "lymanpassword"
+HIDDEN_RACE_COLUMNS = {"pps_locked", "pps_pulse_count", "pps_age_ms"}
+HOME_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Electrathon Dashboard</title>
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+            crossorigin=""
+        >
+        <style>
+            :root {
+                color-scheme: light;
+                --bg: #eef3f8;
+                --card: #ffffff;
+                --border: #cfd9e4;
+                --text: #17324d;
+                --muted: #5f748a;
+                --accent: #1565c0;
+                --accent-soft: #d9ebff;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                font-family: "Segoe UI", Tahoma, sans-serif;
+                background: linear-gradient(180deg, #f7fafc 0%, var(--bg) 100%);
+                color: var(--text);
+            }
+
+            a {
+                color: var(--accent);
+            }
+
+            .page {
+                max-width: 1180px;
+                margin: 0 auto;
+                padding: 28px 20px 36px;
+            }
+
+            .page-header {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 12px;
+                justify-content: space-between;
+                align-items: flex-start;
+                margin-bottom: 20px;
+            }
+
+            .page-header h1 {
+                margin: 0 0 6px;
+            }
+
+            .page-header p {
+                margin: 0;
+                color: var(--muted);
+            }
+
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+                gap: 14px;
+                margin-bottom: 18px;
+            }
+
+            .card {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                padding: 18px;
+                box-shadow: 0 8px 24px rgba(25, 50, 75, 0.06);
+            }
+
+            .card h2,
+            .card h3 {
+                margin: 0 0 10px;
+                font-size: 1rem;
+            }
+
+            .stat-value {
+                font-size: 2.2rem;
+                font-weight: 700;
+                line-height: 1.1;
+            }
+
+            .meta {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .map-card {
+                margin-bottom: 18px;
+            }
+
+            .map-toolbar {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 12px;
+            }
+
+            .map-status {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .map-action {
+                border: 1px solid #8ab4e6;
+                background: var(--accent-soft);
+                color: var(--accent);
+                border-radius: 999px;
+                padding: 8px 14px;
+                font: inherit;
+                cursor: pointer;
+            }
+
+            #route-map {
+                width: 100%;
+                height: 380px;
+                border-radius: 12px;
+                overflow: hidden;
+                border: 1px solid var(--border);
+            }
+
+            .details-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                gap: 14px;
+            }
+
+            .detail-line {
+                margin: 0 0 8px;
+            }
+
+            code {
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+        </style>
+    </head>
+    <body>
+        <main class="page">
+            <header class="page-header">
+                <div>
+                    <h1>Electrathon Dashboard</h1>
+                    <p>Live RPM, lap count, GPS status, and route tracking.</p>
+                </div>
+                <p><a href="{{ url_for('race_list') }}">View Saved Races</a></p>
+            </header>
+
+            <section class="stats-grid">
+                <article class="card">
+                    <h2>Status</h2>
+                    <p class="detail-line">Serial: <b id="status-text">{{ live_state.status }}</b></p>
+                    <p class="detail-line">Session: <b id="session-text">{{ live_state.session_text }}</b></p>
+                    <p class="detail-line">
+                        Current Race File:
+                        <b id="current-file">
+                            {% if live_state.current_session_name and live_state.current_session_url %}
+                                <a href="{{ live_state.current_session_url }}">{{ live_state.current_session_name }}</a>
+                            {% else %}
+                                None
+                            {% endif %}
+                        </b>
+                    </p>
+                    <p class="detail-line">
+                        Last Race File:
+                        <b id="last-file">
+                            {% if live_state.last_session_name and live_state.last_session_url %}
+                                <a href="{{ live_state.last_session_url }}">{{ live_state.last_session_name }}</a>
+                            {% else %}
+                                None
+                            {% endif %}
+                        </b>
+                    </p>
+                </article>
+
+                <article class="card">
+                    <h2>RPM</h2>
+                    <p class="stat-value" id="rpm-text">{{ live_state.rpm_text }}</p>
+                    <p class="meta">Count: <b id="count-text">{{ live_state.count_text }}</b></p>
+                </article>
+
+                <article class="card">
+                    <h2>Session Timing</h2>
+                    <p class="detail-line">Started: <b id="started-text">{{ live_state.started_text }}</b></p>
+                    <p class="detail-line">Elapsed: <b id="elapsed-text">{{ live_state.elapsed_text }}</b></p>
+                </article>
+
+                <article class="card">
+                    <h2>GPS</h2>
+                    <p class="detail-line">Status: <b id="gps-status-text">{{ live_state.gps_status_text }}</b></p>
+                    <p class="detail-line">Latitude: <b id="gps-latitude-text">{{ live_state.gps_latitude_text }}</b></p>
+                    <p class="detail-line">Longitude: <b id="gps-longitude-text">{{ live_state.gps_longitude_text }}</b></p>
+                    <p class="detail-line">UTC Time: <b id="gps-time-text">{{ live_state.gps_time_text }}</b></p>
+                    <p class="detail-line">
+                        <a
+                            id="gps-map-link"
+                            href="{{ live_state.gps_maps_url or '#' }}"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            {% if not live_state.gps_maps_url %}style="display: none;"{% endif %}
+                        >
+                            Open current position in Google Maps
+                        </a>
+                    </p>
+                </article>
+            </section>
+
+            <section class="card map-card">
+                <div class="map-toolbar">
+                    <div>
+                        <h2 style="margin: 0 0 6px;">Live Route Map</h2>
+                        <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
+                    </div>
+                    <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                </div>
+                <div id="route-map"></div>
+            </section>
+
+            <section class="details-grid">
+                <article class="card">
+                    <h3>Raw GPS Serial</h3>
+                    <p class="detail-line">GPS: <code id="raw-gps-line">{{ live_state.last_raw_gps_line }}</code></p>
+                    <p class="detail-line">GPSTIME: <code id="raw-gpstime-line">{{ live_state.last_raw_gpstime_line }}</code></p>
+                </article>
+            </section>
+        </main>
+
+        <script
+            src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""
+        ></script>
+        {{ route_map_script|safe }}
+        <script>
+            const liveStateUrl = {{ url_for("live_state")|tojson }};
+            const liveRouteUrl = {{ url_for("live_route")|tojson }};
+            const routeMap = createRouteMap({
+                containerId: "route-map",
+                statusId: "route-map-status",
+                pointsLabel: "route points"
+            });
+
+            let lastRouteState = {{ route_state|tojson }};
+            routeMap.render(lastRouteState, { forceFit: true });
+
+            document.getElementById("recenter-route").addEventListener("click", function () {
+                routeMap.recenterToRoute(lastRouteState);
+            });
+
+            function updateRaceLink(elementId, filename, url) {
+                const target = document.getElementById(elementId);
+                target.replaceChildren();
+
+                if (filename && url) {
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.textContent = filename;
+                    target.appendChild(link);
+                    return;
+                }
+
+                target.textContent = "None";
+            }
+
+            function updateGpsLink(url) {
+                const gpsLink = document.getElementById("gps-map-link");
+                if (url) {
+                    gpsLink.href = url;
+                    gpsLink.style.display = "inline";
+                    return;
+                }
+
+                gpsLink.removeAttribute("href");
+                gpsLink.style.display = "none";
+            }
+
+            let liveStateRequestInFlight = false;
+            let liveRouteRequestInFlight = false;
+
+            async function refreshLiveState() {
+                if (liveStateRequestInFlight) {
+                    return;
+                }
+
+                liveStateRequestInFlight = true;
+
+                try {
+                    const response = await fetch(liveStateUrl, {
+                        cache: "no-store",
+                        headers: { "Cache-Control": "no-cache" }
+                    });
+                    if (!response.ok) {
+                        return;
+                    }
+
+                    const data = await response.json();
+                    document.getElementById("status-text").textContent = data.status;
+                    document.getElementById("session-text").textContent = data.session_text;
+                    document.getElementById("started-text").textContent = data.started_text;
+                    document.getElementById("elapsed-text").textContent = data.elapsed_text;
+                    document.getElementById("rpm-text").textContent = data.rpm_text;
+                    document.getElementById("count-text").textContent = data.count_text;
+                    document.getElementById("gps-status-text").textContent = data.gps_status_text;
+                    document.getElementById("gps-latitude-text").textContent = data.gps_latitude_text;
+                    document.getElementById("gps-longitude-text").textContent = data.gps_longitude_text;
+                    document.getElementById("gps-time-text").textContent = data.gps_time_text;
+                    document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
+                    document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                    updateRaceLink("current-file", data.current_session_name, data.current_session_url);
+                    updateRaceLink("last-file", data.last_session_name, data.last_session_url);
+                    updateGpsLink(data.gps_maps_url);
+                } catch (error) {
+                } finally {
+                    liveStateRequestInFlight = false;
+                }
+            }
+
+            async function refreshLiveRoute() {
+                if (liveRouteRequestInFlight) {
+                    return;
+                }
+
+                liveRouteRequestInFlight = true;
+
+                try {
+                    const response = await fetch(liveRouteUrl, {
+                        cache: "no-store",
+                        headers: { "Cache-Control": "no-cache" }
+                    });
+                    if (!response.ok) {
+                        return;
+                    }
+
+                    lastRouteState = await response.json();
+                    routeMap.render(lastRouteState);
+                } catch (error) {
+                } finally {
+                    liveRouteRequestInFlight = false;
+                }
+            }
+
+            setInterval(refreshLiveState, 250);
+            setInterval(refreshLiveRoute, 1000);
+        </script>
+    </body>
+</html>
+"""
+ROUTE_MAP_SCRIPT = """
+<script>
+    function createRouteMap(options) {
+        function isValidPoint(point) {
+            return point && Number.isFinite(point.latitude) && Number.isFinite(point.longitude);
+        }
+
+        function toLatLng(point) {
+            return [point.latitude, point.longitude];
+        }
+
+        function removeLayerIfPresent(map, layer) {
+            if (map.hasLayer(layer)) {
+                map.removeLayer(layer);
+            }
+        }
+
+        function setMarker(map, marker, latLng, label) {
+            marker.setLatLng(latLng);
+            marker.bindTooltip(label, { permanent: false, direction: "top" });
+            if (!map.hasLayer(marker)) {
+                marker.addTo(map);
+            }
+        }
+
+        function buildStatusText(data, pointCount) {
+            if (pointCount > 1) {
+                if (data && data.session_active && data.gps_has_fix) {
+                    return pointCount + " route points captured. Live route is updating.";
+                }
+
+                if (data && data.session_active) {
+                    return pointCount + " route points captured. Waiting for the next GPS fix.";
+                }
+
+                return pointCount + " route points captured for this saved run.";
+            }
+
+            if (pointCount === 1) {
+                return "Only one GPS point has been captured so far.";
+            }
+
+            if (isValidPoint(data && data.current_position)) {
+                return "Showing the latest GPS position.";
+            }
+
+            return "Waiting for GPS route data.";
+        }
+
+        const statusElement = document.getElementById(options.statusId);
+        const map = L.map(options.containerId, {
+            zoomControl: true,
+            scrollWheelZoom: true
+        });
+
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        const routeLine = L.polyline([], {
+            color: "#1565c0",
+            weight: 4,
+            opacity: 0.9
+        }).addTo(map);
+
+        const startMarker = L.circleMarker([0, 0], {
+            radius: 7,
+            color: "#2e7d32",
+            fillColor: "#66bb6a",
+            fillOpacity: 0.95
+        });
+
+        const endMarker = L.circleMarker([0, 0], {
+            radius: 7,
+            color: "#c62828",
+            fillColor: "#ef5350",
+            fillOpacity: 0.95
+        });
+
+        const currentMarker = L.circleMarker([0, 0], {
+            radius: 8,
+            color: "#f57c00",
+            fillColor: "#ffb74d",
+            fillOpacity: 0.95
+        });
+
+        let followRoute = true;
+        let hasView = false;
+
+        map.on("dragstart", function () {
+            followRoute = false;
+        });
+
+        map.on("zoomstart", function () {
+            followRoute = false;
+        });
+
+        function fitMap(latLngs, currentLatLng, forceFit) {
+            if (!(forceFit || followRoute || !hasView)) {
+                return;
+            }
+
+            if (latLngs.length > 1) {
+                map.fitBounds(routeLine.getBounds(), { padding: [24, 24] });
+                hasView = true;
+                return;
+            }
+
+            if (latLngs.length === 1) {
+                map.setView(latLngs[0], 17);
+                hasView = true;
+                return;
+            }
+
+            if (currentLatLng) {
+                map.setView(currentLatLng, 17);
+                hasView = true;
+                return;
+            }
+
+            if (!hasView) {
+                map.setView([39.7392, -104.9903], 12);
+                hasView = true;
+            }
+        }
+
+        function render(data, renderOptions) {
+            const opts = renderOptions || {};
+            const points = Array.isArray(data && data.route_points)
+                ? data.route_points.filter(isValidPoint)
+                : [];
+            const latLngs = points.map(toLatLng);
+            const currentLatLng = isValidPoint(data && data.current_position)
+                ? toLatLng(data.current_position)
+                : null;
+
+            routeLine.setLatLngs(latLngs);
+
+            if (latLngs.length) {
+                setMarker(map, startMarker, latLngs[0], "Start");
+                setMarker(
+                    map,
+                    endMarker,
+                    latLngs[latLngs.length - 1],
+                    data && data.session_active ? "Latest route point" : "Finish"
+                );
+            } else {
+                removeLayerIfPresent(map, startMarker);
+                removeLayerIfPresent(map, endMarker);
+            }
+
+            if (currentLatLng) {
+                setMarker(
+                    map,
+                    currentMarker,
+                    currentLatLng,
+                    data && data.session_active ? "Live position" : "Latest position"
+                );
+            } else {
+                removeLayerIfPresent(map, currentMarker);
+            }
+
+            fitMap(latLngs, currentLatLng, Boolean(opts.forceFit));
+
+            if (statusElement) {
+                statusElement.textContent = buildStatusText(data, latLngs.length);
+            }
+
+            window.setTimeout(function () {
+                map.invalidateSize();
+            }, 0);
+        }
+
+        return {
+            render: render,
+            recenterToRoute: function recenterToRoute(data) {
+                followRoute = true;
+                render(data, { forceFit: true });
+            }
+        };
+    }
+</script>
+"""
+RACE_LIST_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Saved Races</title>
+        <style>
+            :root {
+                --bg: #eef3f8;
+                --card: #ffffff;
+                --border: #cfd9e4;
+                --text: #17324d;
+                --muted: #5f748a;
+                --accent: #1565c0;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                font-family: "Segoe UI", Tahoma, sans-serif;
+                background: linear-gradient(180deg, #f7fafc 0%, var(--bg) 100%);
+                color: var(--text);
+            }
+
+            a {
+                color: var(--accent);
+            }
+
+            .page {
+                max-width: 980px;
+                margin: 0 auto;
+                padding: 28px 20px 40px;
+            }
+
+            .card {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                padding: 18px;
+                box-shadow: 0 8px 24px rgba(25, 50, 75, 0.06);
+            }
+
+            .banner {
+                margin: 18px 0;
+                padding: 14px 16px;
+                border-radius: 12px;
+                border: 1px solid transparent;
+            }
+
+            .banner.error {
+                background: #fee;
+                border-color: #d66;
+                color: #8d1b1b;
+            }
+
+            .banner.success {
+                background: #eefbf3;
+                border-color: #6ab184;
+                color: #1a5b31;
+            }
+
+            .banner.warning {
+                background: #fff6df;
+                border-color: #d5a64a;
+                color: #754c00;
+            }
+
+            .list {
+                list-style: none;
+                padding: 0;
+                margin: 18px 0 0;
+            }
+
+            .list li + li {
+                margin-top: 12px;
+            }
+
+            .meta {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            label,
+            input,
+            button {
+                font: inherit;
+            }
+
+            input {
+                margin-top: 8px;
+                padding: 9px 10px;
+                width: min(280px, 100%);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+            }
+
+            button {
+                margin-top: 12px;
+                padding: 10px 14px;
+                border-radius: 999px;
+                border: 1px solid #b53a3a;
+                background: #d84f4f;
+                color: #fff;
+                cursor: pointer;
+            }
+        </style>
+    </head>
+    <body>
+        <main class="page">
+            <p><a href="{{ url_for('home') }}">Back to Dashboard</a></p>
+            <h1>Saved Races</h1>
+            <p class="meta">Folder: <code>{{ log_folder }}</code></p>
+
+            {% if clear_message %}
+                <div class="banner {{ clear_message.kind }}">{{ clear_message.text }}</div>
+            {% endif %}
+
+            <section class="card">
+                <h2 style="margin-top: 0;">Clear Past Race History</h2>
+                <p>
+                    This deletes saved CSV race files from <code>{{ log_folder }}</code>.
+                    If a race is currently running, that active file is kept.
+                </p>
+                <form method="post" action="{{ url_for('clear_race_history') }}">
+                    <label for="clear-history-password"><b>Password</b></label><br>
+                    <input
+                        id="clear-history-password"
+                        type="password"
+                        name="password"
+                        required
+                        autocomplete="current-password"
+                    ><br>
+                    <button
+                        type="submit"
+                        onclick="return confirm('Delete all past race history?');"
+                    >
+                        Clear All Past Race History
+                    </button>
+                </form>
+            </section>
+
+            <section class="card" style="margin-top: 18px;">
+                <h2 style="margin-top: 0;">Race Files</h2>
+                {% if race_items %}
+                    <ul class="list">
+                        {% for race in race_items %}
+                            <li>
+                                <a href="{{ url_for('view_race', filename=race.name) }}">{{ race.name }}</a><br>
+                                <span class="meta">
+                                    Modified: {{ race.modified_text }} |
+                                    Size: {{ race.size }} bytes
+                                </span>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <p>No saved races found yet.</p>
+                {% endif %}
+            </section>
+        </main>
+    </body>
+</html>
+"""
+RACE_DETAIL_TEMPLATE = """
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{{ race_file_name }}</title>
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+            crossorigin=""
+        >
+        <style>
+            :root {
+                --bg: #eef3f8;
+                --card: #ffffff;
+                --border: #cfd9e4;
+                --text: #17324d;
+                --muted: #5f748a;
+                --accent: #1565c0;
+                --accent-soft: #d9ebff;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                font-family: "Segoe UI", Tahoma, sans-serif;
+                background: linear-gradient(180deg, #f7fafc 0%, var(--bg) 100%);
+                color: var(--text);
+            }
+
+            a {
+                color: var(--accent);
+            }
+
+            .page {
+                max-width: 1180px;
+                margin: 0 auto;
+                padding: 28px 20px 40px;
+            }
+
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+                gap: 14px;
+                margin: 18px 0;
+            }
+
+            .card {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                padding: 18px;
+                box-shadow: 0 8px 24px rgba(25, 50, 75, 0.06);
+            }
+
+            .card h2,
+            .card h3,
+            .card p {
+                margin-top: 0;
+            }
+
+            .meta {
+                color: var(--muted);
+            }
+
+            .map-toolbar {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 12px;
+            }
+
+            .map-status {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .map-action {
+                border: 1px solid #8ab4e6;
+                background: var(--accent-soft);
+                color: var(--accent);
+                border-radius: 999px;
+                padding: 8px 14px;
+                font: inherit;
+                cursor: pointer;
+            }
+
+            #route-map {
+                width: 100%;
+                height: 420px;
+                border-radius: 12px;
+                overflow: hidden;
+                border: 1px solid var(--border);
+            }
+
+            .table-wrap {
+                overflow-x: auto;
+            }
+
+            table {
+                width: 100%;
+                border-collapse: collapse;
+            }
+
+            th,
+            td {
+                border: 1px solid #cfd9e4;
+                padding: 8px;
+                text-align: left;
+                vertical-align: top;
+            }
+
+            th {
+                background: #f2f6fb;
+            }
+        </style>
+    </head>
+    <body>
+        <main class="page">
+            <p><a href="{{ url_for('home') }}">Dashboard</a> | <a href="{{ url_for('race_list') }}">Saved Races</a></p>
+            <h1>{{ race_file_name }}</h1>
+            {% if race_date_text %}
+                <p class="meta">Race Date: <b>{{ race_date_text }}</b></p>
+            {% endif %}
+
+            <section class="stats-grid">
+                <article class="card">
+                    <h2>Rows</h2>
+                    <p>{{ rows|length }}</p>
+                </article>
+                <article class="card">
+                    <h2>Duration</h2>
+                    <p>{{ duration }} seconds</p>
+                </article>
+                <article class="card">
+                    <h2>Final Count</h2>
+                    <p>{{ final_count }}</p>
+                </article>
+                <article class="card">
+                    <h2>Max RPM</h2>
+                    <p>{{ "%.2f"|format(max_rpm) }}</p>
+                </article>
+                <article class="card">
+                    <h2>Route Points</h2>
+                    <p>{{ route_point_count }}</p>
+                </article>
+            </section>
+
+            <section class="card" style="margin-bottom: 18px;">
+                <div class="map-toolbar">
+                    <div>
+                        <h2 style="margin: 0 0 6px;">Route Map</h2>
+                        <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
+                    </div>
+                    <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                </div>
+                <div id="route-map"></div>
+            </section>
+
+            <section class="card">
+                <h2>Race Data</h2>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                {% for column in fieldnames %}
+                                    <th>{{ header_labels.get(column, column) }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% if display_rows %}
+                                {% for row in display_rows %}
+                                    <tr>
+                                        {% for column in fieldnames %}
+                                            <td>{{ row.get(column, "") }}</td>
+                                        {% endfor %}
+                                    </tr>
+                                {% endfor %}
+                            {% else %}
+                                <tr>
+                                    <td colspan="{{ table_column_count }}">This race file has no data rows yet.</td>
+                                </tr>
+                            {% endif %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+
+        <script
+            src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""
+        ></script>
+        {{ route_map_script|safe }}
+        <script>
+            const routeData = {
+                session_active: false,
+                gps_has_fix: {{ (route_point_count > 0)|tojson }},
+                current_position: {{ (route_points[-1] if route_points else none)|tojson }},
+                route_points: {{ route_points|tojson }}
+            };
+
+            const routeMap = createRouteMap({
+                containerId: "route-map",
+                statusId: "route-map-status",
+                pointsLabel: "saved route points"
+            });
+
+            routeMap.render(routeData, { forceFit: true });
+
+            document.getElementById("recenter-route").addEventListener("click", function () {
+                routeMap.recenterToRoute(routeData);
+            });
+        </script>
+    </body>
+</html>
+"""
 
 
 def _list_race_files():
@@ -36,6 +978,16 @@ def _resolve_race_file(filename):
     return race_file
 
 
+def _current_position(state):
+    if not state.gps_has_fix or state.gps_latitude is None or state.gps_longitude is None:
+        return None
+
+    return {
+        "latitude": round(state.gps_latitude, 6),
+        "longitude": round(state.gps_longitude, 6),
+    }
+
+
 def _live_state_payload(state):
     started_text = (
         state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -43,21 +995,17 @@ def _live_state_payload(state):
         else "None"
     )
     elapsed_text = f"{state.session_elapsed_seconds:.1f}s" if state.session_active else "0.0s"
-    gps_has_fix = (
-        state.gps_has_fix
-        and state.gps_latitude is not None
-        and state.gps_longitude is not None
-    )
+    current_position = _current_position(state)
     gps_latitude_text = f"{state.gps_latitude:.6f}" if state.gps_latitude is not None else "Unknown"
     gps_longitude_text = f"{state.gps_longitude:.6f}" if state.gps_longitude is not None else "Unknown"
     gps_status_text = (
         f"FIX ({state.gps_satellites} satellites)"
-        if gps_has_fix
+        if current_position
         else "Searching for fix"
     )
     gps_maps_url = (
-        f"https://www.google.com/maps?q={state.gps_latitude:.6f},{state.gps_longitude:.6f}"
-        if gps_has_fix
+        f"https://www.google.com/maps?q={current_position['latitude']:.6f},{current_position['longitude']:.6f}"
+        if current_position
         else None
     )
     gps_time_text = (
@@ -65,14 +1013,6 @@ def _live_state_payload(state):
         if state.gps_utc_date and state.gps_utc_time
         else "Unknown"
     )
-    if state.pps_enabled:
-        pps_status_text = "LOCKED" if state.pps_locked else "Waiting for PPS pulse"
-        pps_pulse_count_text = str(state.pps_pulse_count)
-        pps_age_text = f"{state.pps_age_ms} ms" if state.pps_age_ms is not None else "Unknown"
-    else:
-        pps_status_text = "PPS not connected"
-        pps_pulse_count_text = "N/A"
-        pps_age_text = "N/A"
 
     return {
         "status": state.status,
@@ -83,18 +1023,41 @@ def _live_state_payload(state):
         "elapsed_text": elapsed_text,
         "rpm_text": f"{state.rpm:.2f}",
         "count_text": str(state.count),
+        "gps_has_fix": current_position is not None,
+        "gps_latitude": current_position["latitude"] if current_position else None,
+        "gps_longitude": current_position["longitude"] if current_position else None,
         "gps_status_text": gps_status_text,
         "gps_latitude_text": gps_latitude_text,
         "gps_longitude_text": gps_longitude_text,
         "gps_maps_url": gps_maps_url,
         "gps_time_text": gps_time_text,
-        "pps_status_text": pps_status_text,
-        "pps_pulse_count_text": pps_pulse_count_text,
-        "pps_age_text": pps_age_text,
         "last_raw_gps_line": state.last_raw_gps_line,
         "last_raw_gpstime_line": state.last_raw_gpstime_line,
-        "last_raw_pps_line": state.last_raw_pps_line,
     }
+
+
+def _live_route_payload(state):
+    current_position = _current_position(state)
+    return {
+        "session_active": state.session_active,
+        "gps_has_fix": current_position is not None,
+        "current_position": current_position,
+        "route_points": [dict(point) for point in state.live_route_points],
+    }
+
+
+def _attach_session_urls(payload):
+    payload["current_session_url"] = (
+        url_for("view_race", filename=payload["current_session_name"])
+        if payload["current_session_name"]
+        else None
+    )
+    payload["last_session_url"] = (
+        url_for("view_race", filename=payload["last_session_name"])
+        if payload["last_session_name"]
+        else None
+    )
+    return payload
 
 
 def _prepare_race_table(rows, fieldnames):
@@ -126,6 +1089,35 @@ def _prepare_race_table(rows, fieldnames):
     return display_rows, header_labels, race_date_text
 
 
+def _visible_fieldnames(fieldnames):
+    return [column for column in fieldnames if column not in HIDDEN_RACE_COLUMNS]
+
+
+def _extract_route_points(rows):
+    route_points = []
+
+    for row in rows:
+        latitude_text = str(row.get("latitude", "") or "").strip()
+        longitude_text = str(row.get("longitude", "") or "").strip()
+        if not latitude_text or not longitude_text:
+            continue
+
+        try:
+            point = {
+                "latitude": round(float(latitude_text), 6),
+                "longitude": round(float(longitude_text), 6),
+            }
+        except ValueError:
+            continue
+
+        if route_points and route_points[-1] == point:
+            continue
+
+        route_points.append(point)
+
+    return route_points
+
+
 def _clear_past_race_history(state):
     active_race_name = state.current_session_name if state.session_active else None
     deleted_count = 0
@@ -149,165 +1141,31 @@ def _clear_past_race_history(state):
 
     return deleted_count, skipped_active, error_count
 
+
 def create_app(state):
     app = Flask(__name__)
 
     @app.route("/")
     def home():
-        live_state = _live_state_payload(state)
-
-        current_file_text = "None"
-        if live_state["current_session_name"]:
-            current_file_text = (
-                f'<a href="{url_for("view_race", filename=live_state["current_session_name"])}">'
-                f'{escape(live_state["current_session_name"])}</a>'
-            )
-
-        last_file_text = "None"
-        if live_state["last_session_name"]:
-            last_file_text = (
-                f'<a href="{url_for("view_race", filename=live_state["last_session_name"])}">'
-                f'{escape(live_state["last_session_name"])}</a>'
-            )
-
-        return f"""
-        <html>
-            <head>
-                <title>Electrathon Dashboard</title>
-            </head>
-            <body style="font-family: Arial; text-align: center; margin-top: 60px;">
-                <h1>Electrathon Dashboard</h1>
-                <p><a href="{url_for("race_list")}">View Saved Races</a></p>
-                <p>Status: <b id="status-text">{escape(live_state["status"])}</b></p>
-                <p>Session: <b id="session-text">{escape(live_state["session_text"])}</b></p>
-                <p>Current Race File: <b id="current-file">{current_file_text}</b></p>
-                <p>Last Race File: <b id="last-file">{last_file_text}</b></p>
-                <p>Session Started: <b id="started-text">{escape(live_state["started_text"])}</b></p>
-                <p>Elapsed: <b id="elapsed-text">{escape(live_state["elapsed_text"])}</b></p>
-                <h2>Current RPM</h2>
-                <p id="rpm-text" style="font-size: 48px;">{live_state["rpm_text"]}</p>
-                <h3>Count</h3>
-                <p id="count-text" style="font-size: 32px;">{live_state["count_text"]}</p>
-                <h2>GPS Position</h2>
-                <p>Status: <b id="gps-status-text">{escape(live_state["gps_status_text"])}</b></p>
-                <p>Latitude: <b id="gps-latitude-text">{escape(live_state["gps_latitude_text"])}</b></p>
-                <p>Longitude: <b id="gps-longitude-text">{escape(live_state["gps_longitude_text"])}</b></p>
-                <p>GPS UTC Time: <b id="gps-time-text">{escape(live_state["gps_time_text"])}</b></p>
-                <p>PPS Status: <b id="pps-status-text">{escape(live_state["pps_status_text"])}</b></p>
-                <p>PPS Pulse Count: <b id="pps-pulse-count-text">{escape(live_state["pps_pulse_count_text"])}</b></p>
-                <p>Last PPS Age: <b id="pps-age-text">{escape(live_state["pps_age_text"])}</b></p>
-                <h3>Raw GPS Serial</h3>
-                <p>GPS: <code id="raw-gps-line">{escape(live_state["last_raw_gps_line"])}</code></p>
-                <p>GPSTIME: <code id="raw-gpstime-line">{escape(live_state["last_raw_gpstime_line"])}</code></p>
-                <p>PPS: <code id="raw-pps-line">{escape(live_state["last_raw_pps_line"])}</code></p>
-                <p>
-                    <a
-                        id="gps-map-link"
-                        href="{escape(live_state['gps_maps_url'] or '#')}"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        style="display: {'inline' if live_state['gps_maps_url'] else 'none'};"
-                    >
-                        Open in Google Maps
-                    </a>
-                </p>
-                <script>
-                    const pollIntervalMs = 250;
-
-                    function updateRaceLink(elementId, filename, url) {{
-                        const target = document.getElementById(elementId);
-                        target.textContent = "";
-
-                        if (filename && url) {{
-                            const link = document.createElement("a");
-                            link.href = url;
-                            link.textContent = filename;
-                            target.appendChild(link);
-                            return;
-                        }}
-
-                        target.textContent = "None";
-                    }}
-
-                    function updateGpsLink(url) {{
-                        const gpsLink = document.getElementById("gps-map-link");
-                        if (url) {{
-                            gpsLink.href = url;
-                            gpsLink.style.display = "inline";
-                            return;
-                        }}
-
-                        gpsLink.removeAttribute("href");
-                        gpsLink.style.display = "none";
-                    }}
-
-                    let liveRequestInFlight = false;
-
-                    async function refreshLiveState() {{
-                        if (liveRequestInFlight) {{
-                            return;
-                        }}
-
-                        liveRequestInFlight = true;
-
-                        try {{
-                            const response = await fetch("{url_for("live_state")}", {{
-                                cache: "no-store",
-                                headers: {{ "Cache-Control": "no-cache" }}
-                            }});
-
-                            if (!response.ok) {{
-                                return;
-                            }}
-
-                            const data = await response.json();
-                            document.getElementById("status-text").textContent = data.status;
-                            document.getElementById("session-text").textContent = data.session_text;
-                            document.getElementById("started-text").textContent = data.started_text;
-                            document.getElementById("elapsed-text").textContent = data.elapsed_text;
-                            document.getElementById("rpm-text").textContent = data.rpm_text;
-                            document.getElementById("count-text").textContent = data.count_text;
-                            document.getElementById("gps-status-text").textContent = data.gps_status_text;
-                            document.getElementById("gps-latitude-text").textContent = data.gps_latitude_text;
-                            document.getElementById("gps-longitude-text").textContent = data.gps_longitude_text;
-                            document.getElementById("gps-time-text").textContent = data.gps_time_text;
-                            document.getElementById("pps-status-text").textContent = data.pps_status_text;
-                            document.getElementById("pps-pulse-count-text").textContent = data.pps_pulse_count_text;
-                            document.getElementById("pps-age-text").textContent = data.pps_age_text;
-                            document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
-                            document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
-                            document.getElementById("raw-pps-line").textContent = data.last_raw_pps_line;
-                            updateRaceLink("current-file", data.current_session_name, data.current_session_url);
-                            updateRaceLink("last-file", data.last_session_name, data.last_session_url);
-                            updateGpsLink(data.gps_maps_url);
-                        }} catch (error) {{
-                        }} finally {{
-                            liveRequestInFlight = false;
-                        }}
-                    }}
-
-                    refreshLiveState();
-                    setInterval(refreshLiveState, pollIntervalMs);
-                </script>
-            </body>
-        </html>
-        """
+        payload = _attach_session_urls(_live_state_payload(state))
+        route_payload = _live_route_payload(state)
+        return render_template_string(
+            HOME_TEMPLATE,
+            live_state=payload,
+            route_map_script=ROUTE_MAP_SCRIPT,
+            route_state=route_payload,
+        )
 
     @app.route("/api/live")
     def live_state():
-        live_state = _live_state_payload(state)
-        live_state["current_session_url"] = (
-            url_for("view_race", filename=live_state["current_session_name"])
-            if live_state["current_session_name"]
-            else None
-        )
-        live_state["last_session_url"] = (
-            url_for("view_race", filename=live_state["last_session_name"])
-            if live_state["last_session_name"]
-            else None
-        )
+        payload = _attach_session_urls(_live_state_payload(state))
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
-        response = jsonify(live_state)
+    @app.route("/api/live-route")
+    def live_route():
+        response = jsonify(_live_route_payload(state))
         response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -319,87 +1177,45 @@ def create_app(state):
         error_count = request.args.get("error_count", "0")
         skipped_active = request.args.get("skipped_active") == "1"
 
-        clear_message_html = ""
+        clear_message = None
         if clear_status == "bad_password":
-            clear_message_html = """
-            <p style="padding: 12px; border: 1px solid #d44; background: #fee; color: #900;">
-                Incorrect password. Race history was not deleted.
-            </p>
-            """
+            clear_message = {
+                "kind": "error",
+                "text": "Incorrect password. Race history was not deleted.",
+            }
         elif clear_status == "cleared":
-            skipped_text = " The active race file was kept." if skipped_active else ""
-            clear_message_html = f"""
-            <p style="padding: 12px; border: 1px solid #3a7; background: #eefbf3; color: #174;">
-                Deleted {escape(deleted_count)} saved race file(s).{escape(skipped_text)}
-            </p>
-            """
+            message = f"Deleted {deleted_count} saved race file(s)."
+            if skipped_active:
+                message += " The active race file was kept."
+            clear_message = {"kind": "success", "text": message}
         elif clear_status == "partial":
-            skipped_text = " The active race file was kept." if skipped_active else ""
-            clear_message_html = f"""
-            <p style="padding: 12px; border: 1px solid #c80; background: #fff6df; color: #754c00;">
-                Deleted {escape(deleted_count)} saved race file(s), but {escape(error_count)} file(s) could not be removed.{escape(skipped_text)}
-            </p>
-            """
+            message = (
+                f"Deleted {deleted_count} saved race file(s), but {error_count} file(s) "
+                "could not be removed."
+            )
+            if skipped_active:
+                message += " The active race file was kept."
+            clear_message = {"kind": "warning", "text": message}
 
-        if race_files:
-            race_items = []
-            for race_file in race_files:
-                race_stat = race_file.stat()
-                modified_text = datetime.fromtimestamp(race_stat.st_mtime).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-                race_items.append(
-                    f"""
-                    <li style="margin-bottom: 12px;">
-                        <a href="{url_for("view_race", filename=race_file.name)}">{escape(race_file.name)}</a><br>
-                        <small>
-                            Modified: {escape(modified_text)}
-                            | Size: {race_stat.st_size} bytes
-                        </small>
-                    </li>
-                    """
-                )
-            race_list_html = f'<ul style="padding-left: 20px;">{"".join(race_items)}</ul>'
-        else:
-            race_list_html = "<p>No saved races found yet.</p>"
+        race_items = []
+        for race_file in race_files:
+            race_stat = race_file.stat()
+            race_items.append(
+                {
+                    "name": race_file.name,
+                    "modified_text": datetime.fromtimestamp(race_stat.st_mtime).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "size": race_stat.st_size,
+                }
+            )
 
-        return f"""
-        <html>
-            <head>
-                <title>Saved Races</title>
-            </head>
-            <body style="font-family: Arial; margin: 40px auto; max-width: 900px; line-height: 1.5;">
-                <p><a href="{url_for("home")}">Back to Dashboard</a></p>
-                <h1>Saved Races</h1>
-                <p>Folder: <code>{escape(str(LOG_FOLDER))}</code></p>
-                {clear_message_html}
-                <form method="post" action="{url_for("clear_race_history")}" style="margin: 24px 0; padding: 16px; border: 1px solid #d8d8d8; background: #f8f8f8;">
-                    <h2 style="margin-top: 0;">Clear Past Race History</h2>
-                    <p style="margin-top: 0;">
-                        This deletes saved CSV race files from <code>{escape(str(LOG_FOLDER))}</code>.
-                        If a race is currently running, that active file is kept.
-                    </p>
-                    <label for="clear-history-password"><b>Password</b></label><br>
-                    <input
-                        id="clear-history-password"
-                        type="password"
-                        name="password"
-                        required
-                        autocomplete="current-password"
-                        style="margin-top: 8px; padding: 8px; width: 280px; max-width: 100%;"
-                    ><br>
-                    <button
-                        type="submit"
-                        style="margin-top: 12px; padding: 10px 14px; border: 1px solid #b33; background: #d44; color: white; cursor: pointer;"
-                        onclick="return confirm('Delete all past race history?');"
-                    >
-                        Clear All Past Race History
-                    </button>
-                </form>
-                {race_list_html}
-            </body>
-        </html>
-        """
+        return render_template_string(
+            RACE_LIST_TEMPLATE,
+            clear_message=clear_message,
+            log_folder=str(LOG_FOLDER),
+            race_items=race_items,
+        )
 
     @app.post("/races/clear-history")
     def clear_race_history():
@@ -426,12 +1242,25 @@ def create_app(state):
         with race_file.open("r", newline="", encoding="utf-8") as file:
             reader = csv.DictReader(file)
             rows = list(reader)
-            fieldnames = reader.fieldnames or ["timestamp", "elapsed_seconds", "count", "rpm"]
+            raw_fieldnames = reader.fieldnames or [
+                "timestamp",
+                "elapsed_seconds",
+                "count",
+                "rpm",
+                "latitude",
+                "longitude",
+                "gps_fix",
+                "gps_satellites",
+                "gps_utc_date",
+                "gps_utc_time",
+            ]
 
+        fieldnames = _visible_fieldnames(raw_fieldnames) or raw_fieldnames
         max_rpm = 0.0
         final_count = 0
         duration = "0.00"
         display_rows, header_labels, race_date_text = _prepare_race_table(rows, fieldnames)
+        route_points = _extract_route_points(rows)
 
         if rows:
             duration = rows[-1].get("elapsed_seconds", "0.00")
@@ -450,57 +1279,21 @@ def create_app(state):
             if rpm_values:
                 max_rpm = max(rpm_values)
 
-        header_html = "".join(
-            f"<th style=\"border: 1px solid #ccc; padding: 8px; background: #f3f3f3;\">{escape(header_labels.get(column, column))}</th>"
-            for column in fieldnames
+        return render_template_string(
+            RACE_DETAIL_TEMPLATE,
+            display_rows=display_rows,
+            duration=duration,
+            fieldnames=fieldnames,
+            final_count=final_count,
+            header_labels=header_labels,
+            max_rpm=max_rpm,
+            race_date_text=race_date_text,
+            race_file_name=race_file.name,
+            route_map_script=ROUTE_MAP_SCRIPT,
+            route_points=route_points,
+            route_point_count=len(route_points),
+            rows=rows,
+            table_column_count=max(len(fieldnames), 1),
         )
-
-        row_html = "".join(
-            "<tr>"
-            + "".join(
-                f"<td style=\"border: 1px solid #ccc; padding: 8px;\">{escape(row.get(column, ''))}</td>"
-                for column in fieldnames
-            )
-            + "</tr>"
-            for row in display_rows
-        )
-
-        if not row_html:
-            row_html = (
-                f"<tr><td colspan=\"{len(fieldnames)}\" style=\"border: 1px solid #ccc; padding: 12px;\">"
-                "This race file has no data rows yet."
-                "</td></tr>"
-            )
-
-        race_date_html = ""
-        if race_date_text:
-            race_date_html = f"<p><b>Race Date:</b> {escape(race_date_text)}</p>"
-
-        return f"""
-        <html>
-            <head>
-                <title>{escape(race_file.name)}</title>
-            </head>
-            <body style="font-family: Arial; margin: 40px auto; max-width: 1100px; line-height: 1.5;">
-                <p><a href="{url_for("home")}">Dashboard</a> | <a href="{url_for("race_list")}">Saved Races</a></p>
-                <h1>{escape(race_file.name)}</h1>
-                {race_date_html}
-                <p><b>Rows:</b> {len(rows)}</p>
-                <p><b>Duration:</b> {escape(str(duration))} seconds</p>
-                <p><b>Final Count:</b> {final_count}</p>
-                <p><b>Max RPM:</b> {max_rpm:.2f}</p>
-                <div style="overflow-x: auto;">
-                    <table style="border-collapse: collapse; width: 100%;">
-                        <thead>
-                            <tr>{header_html}</tr>
-                        </thead>
-                        <tbody>
-                            {row_html}
-                        </tbody>
-                    </table>
-                </div>
-            </body>
-        </html>
-        """
 
     return app

@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Electrathon Dashboard</title>
+        <link
+            rel="stylesheet"
+            href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+            integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+            crossorigin=""
+        >
+        <style>
+            :root {
+                color-scheme: light;
+                --bg: #eef3f8;
+                --card: #ffffff;
+                --border: #cfd9e4;
+                --text: #17324d;
+                --muted: #5f748a;
+                --accent: #1565c0;
+                --accent-soft: #d9ebff;
+            }
+
+            * {
+                box-sizing: border-box;
+            }
+
+            body {
+                margin: 0;
+                font-family: "Segoe UI", Tahoma, sans-serif;
+                background: linear-gradient(180deg, #f7fafc 0%, var(--bg) 100%);
+                color: var(--text);
+            }
+
+            a {
+                color: var(--accent);
+            }
+
+            .page {
+                max-width: 1180px;
+                margin: 0 auto;
+                padding: 28px 20px 36px;
+            }
+
+            .page-header {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 12px;
+                justify-content: space-between;
+                align-items: flex-start;
+                margin-bottom: 20px;
+            }
+
+            .page-header h1 {
+                margin: 0 0 6px;
+            }
+
+            .page-header p {
+                margin: 0;
+                color: var(--muted);
+            }
+
+            .stats-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+                gap: 14px;
+                margin-bottom: 18px;
+            }
+
+            .card {
+                background: var(--card);
+                border: 1px solid var(--border);
+                border-radius: 14px;
+                padding: 18px;
+                box-shadow: 0 8px 24px rgba(25, 50, 75, 0.06);
+            }
+
+            .card h2,
+            .card h3 {
+                margin: 0 0 10px;
+                font-size: 1rem;
+            }
+
+            .stat-value {
+                font-size: 2.2rem;
+                font-weight: 700;
+                line-height: 1.1;
+            }
+
+            .meta {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .map-card {
+                margin-bottom: 18px;
+            }
+
+            .map-toolbar {
+                display: flex;
+                flex-wrap: wrap;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 12px;
+            }
+
+            .map-status {
+                color: var(--muted);
+                font-size: 0.95rem;
+            }
+
+            .map-action {
+                border: 1px solid #8ab4e6;
+                background: var(--accent-soft);
+                color: var(--accent);
+                border-radius: 999px;
+                padding: 8px 14px;
+                font: inherit;
+                cursor: pointer;
+            }
+
+            #route-map {
+                width: 100%;
+                height: 380px;
+                border-radius: 12px;
+                overflow: hidden;
+                border: 1px solid var(--border);
+            }
+
+            .details-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                gap: 14px;
+            }
+
+            .detail-line {
+                margin: 0 0 8px;
+            }
+
+            code {
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+        </style>
+    </head>
+    <body>
+        <main class="page">
+            <header class="page-header">
+                <div>
+                    <h1>Electrathon Dashboard</h1>
+                    <p>Live RPM, lap count, GPS status, and route tracking.</p>
+                </div>
+                <p><a href="{{ url_for('race_list') }}">View Saved Races</a></p>
+            </header>
+
+            <section class="stats-grid">
+                <article class="card">
+                    <h2>Status</h2>
+                    <p class="detail-line">Serial: <b id="status-text">{{ live_state.status }}</b></p>
+                    <p class="detail-line">Session: <b id="session-text">{{ live_state.session_text }}</b></p>
+                    <p class="detail-line">
+                        Current Race File:
+                        <b id="current-file">
+                            {% if live_state.current_session_name and live_state.current_session_url %}
+                                <a href="{{ live_state.current_session_url }}">{{ live_state.current_session_name }}</a>
+                            {% else %}
+                                None
+                            {% endif %}
+                        </b>
+                    </p>
+                    <p class="detail-line">
+                        Last Race File:
+                        <b id="last-file">
+                            {% if live_state.last_session_name and live_state.last_session_url %}
+                                <a href="{{ live_state.last_session_url }}">{{ live_state.last_session_name }}</a>
+                            {% else %}
+                                None
+                            {% endif %}
+                        </b>
+                    </p>
+                </article>
+
+                <article class="card">
+                    <h2>RPM</h2>
+                    <p class="stat-value" id="rpm-text">{{ live_state.rpm_text }}</p>
+                    <p class="meta">Count: <b id="count-text">{{ live_state.count_text }}</b></p>
+                </article>
+
+                <article class="card">
+                    <h2>Session Timing</h2>
+                    <p class="detail-line">Started: <b id="started-text">{{ live_state.started_text }}</b></p>
+                    <p class="detail-line">Elapsed: <b id="elapsed-text">{{ live_state.elapsed_text }}</b></p>
+                </article>
+
+                <article class="card">
+                    <h2>GPS</h2>
+                    <p class="detail-line">Status: <b id="gps-status-text">{{ live_state.gps_status_text }}</b></p>
+                    <p class="detail-line">Latitude: <b id="gps-latitude-text">{{ live_state.gps_latitude_text }}</b></p>
+                    <p class="detail-line">Longitude: <b id="gps-longitude-text">{{ live_state.gps_longitude_text }}</b></p>
+                    <p class="detail-line">UTC Time: <b id="gps-time-text">{{ live_state.gps_time_text }}</b></p>
+                    <p class="detail-line">
+                        <a
+                            id="gps-map-link"
+                            href="{{ live_state.gps_maps_url or '#' }}"
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            {% if not live_state.gps_maps_url %}style="display: none;"{% endif %}
+                        >
+                            Open current position in Google Maps
+                        </a>
+                    </p>
+                </article>
+            </section>
+
+            <section class="card map-card">
+                <div class="map-toolbar">
+                    <div>
+                        <h2 style="margin: 0 0 6px;">Live Route Map</h2>
+                        <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
+                    </div>
+                    <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                </div>
+                <div id="route-map"></div>
+            </section>
+
+            <section class="details-grid">
+                <article class="card">
+                    <h3>Raw GPS Serial</h3>
+                    <p class="detail-line">GPS: <code id="raw-gps-line">{{ live_state.last_raw_gps_line }}</code></p>
+                    <p class="detail-line">GPSTIME: <code id="raw-gpstime-line">{{ live_state.last_raw_gpstime_line }}</code></p>
+                </article>
+            </section>
+        </main>
+
+        <script
+            src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""
+        ></script>
+        <script src="{{ url_for('static', filename='route_map.js') }}"></script>
+        <script>
+            const liveStateUrl = {{ url_for("live_state")|tojson }};
+            const liveRouteUrl = {{ url_for("live_route")|tojson }};
+            const routeMap = createRouteMap({
+                containerId: "route-map",
+                statusId: "route-map-status",
+                pointsLabel: "route points"
+            });
+
+            let lastRouteState = {{ route_state|tojson }};
+            routeMap.render(lastRouteState, { forceFit: true });
+
+            document.getElementById("recenter-route").addEventListener("click", function () {
+                routeMap.recenterToRoute(lastRouteState);
+            });
+
+            function updateRaceLink(elementId, filename, url) {
+                const target = document.getElementById(elementId);
+                target.replaceChildren();
+
+                if (filename && url) {
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.textContent = filename;
+                    target.appendChild(link);
+                    return;
+                }
+
+                target.textContent = "None";
+            }
+
+            function updateGpsLink(url) {
+                const gpsLink = document.getElementById("gps-map-link");
+                if (url) {
+                    gpsLink.href = url;
+                    gpsLink.style.display = "inline";
+                    return;
+                }
+
+                gpsLink.removeAttribute("href");
+                gpsLink.style.display = "none";
+            }
+
+            let liveStateRequestInFlight = false;
+            let liveRouteRequestInFlight = false;
+
+            async function refreshLiveState() {
+                if (liveStateRequestInFlight) {
+                    return;
+                }
+
+                liveStateRequestInFlight = true;
+
+                try {
+                    const response = await fetch(liveStateUrl, {
+                        cache: "no-store",
+                        headers: { "Cache-Control": "no-cache" }
+                    });
+                    if (!response.ok) {
+                        return;
+                    }
+
+                    const data = await response.json();
+                    document.getElementById("status-text").textContent = data.status;
+                    document.getElementById("session-text").textContent = data.session_text;
+                    document.getElementById("started-text").textContent = data.started_text;
+                    document.getElementById("elapsed-text").textContent = data.elapsed_text;
+                    document.getElementById("rpm-text").textContent = data.rpm_text;
+                    document.getElementById("count-text").textContent = data.count_text;
+                    document.getElementById("gps-status-text").textContent = data.gps_status_text;
+                    document.getElementById("gps-latitude-text").textContent = data.gps_latitude_text;
+                    document.getElementById("gps-longitude-text").textContent = data.gps_longitude_text;
+                    document.getElementById("gps-time-text").textContent = data.gps_time_text;
+                    document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
+                    document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                    updateRaceLink("current-file", data.current_session_name, data.current_session_url);
+                    updateRaceLink("last-file", data.last_session_name, data.last_session_url);
+                    updateGpsLink(data.gps_maps_url);
+                } catch (error) {
+                } finally {
+                    liveStateRequestInFlight = false;
+                }
+            }
+
+            async function refreshLiveRoute() {
+                if (liveRouteRequestInFlight) {
+                    return;
+                }
+
+                liveRouteRequestInFlight = true;
+
+                try {
+                    const response = await fetch(liveRouteUrl, {
+                        cache: "no-store",
+                        headers: { "Cache-Control": "no-cache" }
+                    });
+                    if (!response.ok) {
+                        return;
+                    }
+
+                    lastRouteState = await response.json();
+                    routeMap.render(lastRouteState);
+                } catch (error) {
+                } finally {
+                    liveRouteRequestInFlight = false;
+                }
+            }
+
+            setInterval(refreshLiveState, 250);
+            setInterval(refreshLiveRoute, 1000);
+        </script>
+    </body>
+</html>

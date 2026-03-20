@@ -5,6 +5,7 @@ from config import LOG_FOLDER
 csv_file = None
 csv_writer = None
 
+
 def start_session_log(state, started_monotonic):
     global csv_file, csv_writer
 
@@ -30,9 +31,6 @@ def start_session_log(state, started_monotonic):
             "gps_satellites",
             "gps_utc_date",
             "gps_utc_time",
-            "pps_locked",
-            "pps_pulse_count",
-            "pps_age_ms",
         ]
     )
 
@@ -42,8 +40,17 @@ def start_session_log(state, started_monotonic):
     state.session_elapsed_seconds = 0.0
     state.current_session_filename = str(filename)
     state.current_session_name = filename.name
+    state.live_route_points = []
+    if state.gps_has_fix and state.gps_latitude is not None and state.gps_longitude is not None:
+        state.live_route_points.append(
+            {
+                "latitude": round(state.gps_latitude, 6),
+                "longitude": round(state.gps_longitude, 6),
+            }
+        )
 
     print(f"Race session started -> {filename}")
+
 
 def write_session_row(state):
     global csv_file, csv_writer
@@ -64,12 +71,10 @@ def write_session_row(state):
             state.gps_satellites,
             state.gps_utc_date or "",
             state.gps_utc_time or "",
-            1 if state.pps_locked else 0,
-            state.pps_pulse_count,
-            state.pps_age_ms if state.pps_age_ms is not None else "",
         ]
     )
     csv_file.flush()
+
 
 def stop_session_log(state):
     global csv_file, csv_writer

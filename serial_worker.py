@@ -10,6 +10,23 @@ RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
 
 
+def _append_live_route_point(state):
+    if not state.session_active:
+        return
+
+    if not state.gps_has_fix or state.gps_latitude is None or state.gps_longitude is None:
+        return
+
+    point = {
+        "latitude": round(state.gps_latitude, 6),
+        "longitude": round(state.gps_longitude, 6),
+    }
+    if state.live_route_points and state.live_route_points[-1] == point:
+        return
+
+    state.live_route_points.append(point)
+
+
 def run_serial_worker(state):
     try:
         ser = serial.Serial(PORT, BAUD, timeout=0.1)
@@ -61,6 +78,7 @@ def run_serial_worker(state):
                             state.gps_longitude = float(gps_parts[1])
                             state.gps_satellites = int(gps_parts[2])
                             state.gps_has_fix = True
+                            _append_live_route_point(state)
                         except ValueError:
                             pass
 
@@ -76,27 +94,6 @@ def run_serial_worker(state):
                     if len(time_parts) >= 2:
                         state.gps_utc_date = time_parts[0]
                         state.gps_utc_time = time_parts[1]
-
-            elif line.startswith("PPS:"):
-                print(f"[ARDUINO] {line}")
-                state.last_raw_pps_line = line
-                pps_payload = line.split(":", 1)[1].strip()
-                if pps_payload == "DISABLED":
-                    state.pps_enabled = False
-                    state.pps_locked = False
-                    state.pps_pulse_count = 0
-                    state.pps_age_ms = None
-                else:
-                    state.pps_enabled = True
-                    pps_parts = pps_payload.split(",")
-                    if len(pps_parts) >= 3:
-                        try:
-                            state.pps_locked = pps_parts[0] == "1"
-                            state.pps_pulse_count = int(pps_parts[1])
-                            pps_age_ms = int(pps_parts[2])
-                            state.pps_age_ms = pps_age_ms if pps_age_ms >= 0 else None
-                        except ValueError:
-                            pass
 
             if state.count < rpm_samples[-1][1]:
                 rpm_samples.clear()
@@ -154,12 +151,8 @@ def run_serial_worker(state):
         state.gps_satellites = 0
         state.gps_utc_date = None
         state.gps_utc_time = None
-        state.pps_enabled = True
-        state.pps_locked = False
-        state.pps_pulse_count = 0
-        state.pps_age_ms = None
         state.last_raw_gps_line = "Waiting for GPS serial data"
         state.last_raw_gpstime_line = "Waiting for GPS time data"
-        state.last_raw_pps_line = "Waiting for PPS data"
+        state.live_route_points = []
         stop_session_log(state)
         ser.close()
