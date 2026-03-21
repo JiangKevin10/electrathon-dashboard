@@ -400,7 +400,8 @@ HOME_TEMPLATE = """
                 target.style.color = isError ? "#8d1b1b" : "";
             }
 
-            function applyLiveState(data) {
+            function applyLiveState(data, options) {
+                const opts = options || {};
                 document.getElementById("status-text").textContent = data.status;
                 document.getElementById("session-text").textContent = data.session_text;
                 document.getElementById("started-text").textContent = data.started_text;
@@ -422,8 +423,10 @@ HOME_TEMPLATE = """
                 updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                 updateRaceLink("last-file", data.last_session_name, data.last_session_url);
                 updateGpsLink(data.gps_maps_url);
-                syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
-                syncNumberInput("minimum-lap-seconds-input", data.minimum_lap_seconds_value);
+                if (opts.syncControls) {
+                    syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
+                    syncNumberInput("minimum-lap-seconds-input", data.minimum_lap_seconds_value);
+                }
             }
 
             function readPositiveNumber(elementId) {
@@ -506,7 +509,7 @@ HOME_TEMPLATE = """
                         throw new Error(payload.error || "Request failed.");
                     }
 
-                    applyLiveState(payload.live_state);
+                    applyLiveState(payload.live_state, { syncControls: true });
                     lastRouteState = payload.route_state;
                     routeMap.render(lastRouteState, { forceFit: true });
                     setStartZoneActionText(successMessage, false);
