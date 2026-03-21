@@ -4,6 +4,7 @@ import serial
 import time
 from config import PORT, BAUD, MAGNETS_PER_REV
 from csv_logger import start_session_log, write_session_row, stop_session_log
+from lap_tracker import reset_lap_tracking, update_lap_tracking
 
 RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
@@ -78,6 +79,9 @@ def run_serial_worker(state):
                             state.gps_longitude = float(gps_parts[1])
                             state.gps_satellites = int(gps_parts[2])
                             state.gps_has_fix = True
+                            if state.session_active and state.session_started_monotonic is not None:
+                                state.session_elapsed_seconds = now - state.session_started_monotonic
+                            update_lap_tracking(state, now)
                             _append_live_route_point(state)
                         except ValueError:
                             pass
@@ -102,6 +106,7 @@ def run_serial_worker(state):
 
             if state.session_requested and not last_session_requested:
                 start_session_log(state, now)
+                reset_lap_tracking(state, anchor_monotonic=now)
                 last_rpm_time = now
                 last_log_time = now
                 rpm_samples.clear()
@@ -154,5 +159,6 @@ def run_serial_worker(state):
         state.last_raw_gps_line = "Waiting for GPS serial data"
         state.last_raw_gpstime_line = "Waiting for GPS time data"
         state.live_route_points = []
+        reset_lap_tracking(state)
         stop_session_log(state)
         ser.close()

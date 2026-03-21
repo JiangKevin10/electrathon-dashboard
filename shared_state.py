@@ -1,3 +1,6 @@
+from lap_tracker import DEFAULT_MINIMUM_LAP_SECONDS, DEFAULT_START_ZONE_RADIUS_METERS
+
+
 class SharedState:
     def __init__(self):
         self.count = 0
@@ -21,3 +24,12 @@ class SharedState:
         self.session_started_monotonic = None
         self.session_elapsed_seconds = 0.0
         self.live_route_points = []
+        self.start_zone_latitude = None
+        self.start_zone_longitude = None
+        self.start_zone_radius_meters = DEFAULT_START_ZONE_RADIUS_METERS
+        self.minimum_lap_seconds = DEFAULT_MINIMUM_LAP_SECONDS
+        self.start_zone_inside = False
+        self.start_zone_departed = False
+        self.start_zone_anchor_monotonic = None
+        self.lap_count = 0
+        self.last_lap_elapsed_seconds = None

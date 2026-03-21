@@ -1,4 +1,5 @@
 import csv
+import time
 from datetime import datetime
 
 from flask import (
@@ -12,6 +13,7 @@ from flask import (
 )
 
 from config import LOG_FOLDER
+from lap_tracker import clear_start_zone, configure_start_zone, has_start_zone
 
 CLEAR_HISTORY_PASSWORD = "lymanpassword"
 HIDDEN_RACE_COLUMNS = {"pps_locked", "pps_pulse_count", "pps_age_ms"}
@@ -157,6 +159,46 @@ HOME_TEMPLATE = """
                 margin: 0 0 8px;
             }
 
+            label,
+            input,
+            button {
+                font: inherit;
+            }
+
+            .field-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+                gap: 10px 12px;
+                margin: 12px 0;
+                align-items: end;
+            }
+
+            .field-grid label {
+                display: block;
+                margin-bottom: 6px;
+                font-weight: 600;
+            }
+
+            .field-grid input {
+                width: 100%;
+                padding: 9px 10px;
+                border: 1px solid var(--border);
+                border-radius: 8px;
+            }
+
+            .action-row {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 10px;
+                margin: 12px 0 10px;
+            }
+
+            .secondary-action {
+                border-color: var(--border);
+                background: #f7fafc;
+                color: var(--text);
+            }
+
             code {
                 white-space: pre-wrap;
                 word-break: break-word;
@@ -213,6 +255,13 @@ HOME_TEMPLATE = """
                 </article>
 
                 <article class="card">
+                    <h2>Laps</h2>
+                    <p class="stat-value" id="lap-count-text">{{ live_state.lap_count_text }}</p>
+                    <p class="meta">Last Lap: <b id="last-lap-text">{{ live_state.last_lap_text }}</b></p>
+                    <p class="meta">Zone: <b id="start-zone-status-text">{{ live_state.start_zone_status_text }}</b></p>
+                </article>
+
+                <article class="card">
                     <h2>GPS</h2>
                     <p class="detail-line">Status: <b id="gps-status-text">{{ live_state.gps_status_text }}</b></p>
                     <p class="detail-line">Latitude: <b id="gps-latitude-text">{{ live_state.gps_latitude_text }}</b></p>
@@ -245,6 +294,40 @@ HOME_TEMPLATE = """
 
             <section class="details-grid">
                 <article class="card">
+                    <h3>Start / Finish Zone</h3>
+                    <p class="detail-line">Center: <b id="start-zone-center-text">{{ live_state.start_zone_center_text }}</b></p>
+                    <p class="detail-line">Radius: <b id="start-zone-radius-text">{{ live_state.start_zone_radius_text }}</b></p>
+                    <p class="detail-line">Minimum Lap Time: <b id="minimum-lap-text">{{ live_state.minimum_lap_text }}</b></p>
+                    <div class="field-grid">
+                        <div>
+                            <label for="start-zone-radius-input">Radius (meters)</label>
+                            <input
+                                id="start-zone-radius-input"
+                                type="number"
+                                min="1"
+                                step="1"
+                                value="{{ live_state.start_zone_radius_value }}"
+                            >
+                        </div>
+                        <div>
+                            <label for="minimum-lap-seconds-input">Minimum Lap Time (seconds)</label>
+                            <input
+                                id="minimum-lap-seconds-input"
+                                type="number"
+                                min="1"
+                                step="1"
+                                value="{{ live_state.minimum_lap_seconds_value }}"
+                            >
+                        </div>
+                    </div>
+                    <div class="action-row">
+                        <button class="map-action" id="set-start-zone" type="button">Set Start Here</button>
+                        <button class="map-action secondary-action" id="clear-start-zone" type="button">Clear Start</button>
+                    </div>
+                    <p class="meta" id="start-zone-action-text">Use the current GPS fix to place the start zone.</p>
+                </article>
+
+                <article class="card">
                     <h3>Raw GPS Serial</h3>
                     <p class="detail-line">GPS: <code id="raw-gps-line">{{ live_state.last_raw_gps_line }}</code></p>
                     <p class="detail-line">GPSTIME: <code id="raw-gpstime-line">{{ live_state.last_raw_gpstime_line }}</code></p>
@@ -261,6 +344,8 @@ HOME_TEMPLATE = """
         <script>
             const liveStateUrl = {{ url_for("live_state")|tojson }};
             const liveRouteUrl = {{ url_for("live_route")|tojson }};
+            const setStartZoneUrl = {{ url_for("set_start_zone")|tojson }};
+            const clearStartZoneUrl = {{ url_for("clear_start_zone_route")|tojson }};
             const routeMap = createRouteMap({
                 containerId: "route-map",
                 statusId: "route-map-status",
@@ -301,6 +386,55 @@ HOME_TEMPLATE = """
                 gpsLink.style.display = "none";
             }
 
+            function syncNumberInput(elementId, value) {
+                const input = document.getElementById(elementId);
+                const nextValue = String(value);
+                if (document.activeElement !== input && input.value !== nextValue) {
+                    input.value = nextValue;
+                }
+            }
+
+            function setStartZoneActionText(text, isError) {
+                const target = document.getElementById("start-zone-action-text");
+                target.textContent = text;
+                target.style.color = isError ? "#8d1b1b" : "";
+            }
+
+            function applyLiveState(data) {
+                document.getElementById("status-text").textContent = data.status;
+                document.getElementById("session-text").textContent = data.session_text;
+                document.getElementById("started-text").textContent = data.started_text;
+                document.getElementById("elapsed-text").textContent = data.elapsed_text;
+                document.getElementById("rpm-text").textContent = data.rpm_text;
+                document.getElementById("count-text").textContent = data.count_text;
+                document.getElementById("lap-count-text").textContent = data.lap_count_text;
+                document.getElementById("last-lap-text").textContent = data.last_lap_text;
+                document.getElementById("start-zone-status-text").textContent = data.start_zone_status_text;
+                document.getElementById("gps-status-text").textContent = data.gps_status_text;
+                document.getElementById("gps-latitude-text").textContent = data.gps_latitude_text;
+                document.getElementById("gps-longitude-text").textContent = data.gps_longitude_text;
+                document.getElementById("gps-time-text").textContent = data.gps_time_text;
+                document.getElementById("start-zone-center-text").textContent = data.start_zone_center_text;
+                document.getElementById("start-zone-radius-text").textContent = data.start_zone_radius_text;
+                document.getElementById("minimum-lap-text").textContent = data.minimum_lap_text;
+                document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
+                document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                updateRaceLink("current-file", data.current_session_name, data.current_session_url);
+                updateRaceLink("last-file", data.last_session_name, data.last_session_url);
+                updateGpsLink(data.gps_maps_url);
+                syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
+                syncNumberInput("minimum-lap-seconds-input", data.minimum_lap_seconds_value);
+            }
+
+            function readPositiveNumber(elementId) {
+                const parsedValue = Number.parseFloat(document.getElementById(elementId).value);
+                if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+                    return null;
+                }
+
+                return parsedValue;
+            }
+
             let liveStateRequestInFlight = false;
             let liveRouteRequestInFlight = false;
 
@@ -321,21 +455,7 @@ HOME_TEMPLATE = """
                     }
 
                     const data = await response.json();
-                    document.getElementById("status-text").textContent = data.status;
-                    document.getElementById("session-text").textContent = data.session_text;
-                    document.getElementById("started-text").textContent = data.started_text;
-                    document.getElementById("elapsed-text").textContent = data.elapsed_text;
-                    document.getElementById("rpm-text").textContent = data.rpm_text;
-                    document.getElementById("count-text").textContent = data.count_text;
-                    document.getElementById("gps-status-text").textContent = data.gps_status_text;
-                    document.getElementById("gps-latitude-text").textContent = data.gps_latitude_text;
-                    document.getElementById("gps-longitude-text").textContent = data.gps_longitude_text;
-                    document.getElementById("gps-time-text").textContent = data.gps_time_text;
-                    document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
-                    document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
-                    updateRaceLink("current-file", data.current_session_name, data.current_session_url);
-                    updateRaceLink("last-file", data.last_session_name, data.last_session_url);
-                    updateGpsLink(data.gps_maps_url);
+                    applyLiveState(data);
                 } catch (error) {
                 } finally {
                     liveStateRequestInFlight = false;
@@ -365,6 +485,61 @@ HOME_TEMPLATE = """
                     liveRouteRequestInFlight = false;
                 }
             }
+
+            async function sendStartZoneRequest(url, body, successMessage) {
+                const requestOptions = {
+                    method: "POST",
+                    headers: {}
+                };
+                if (body !== undefined) {
+                    requestOptions.headers["Content-Type"] = "application/json";
+                    requestOptions.body = JSON.stringify(body);
+                }
+
+                try {
+                    const response = await fetch(url, requestOptions);
+                    const payload = await response.json().catch(function () {
+                        return {};
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(payload.error || "Request failed.");
+                    }
+
+                    applyLiveState(payload.live_state);
+                    lastRouteState = payload.route_state;
+                    routeMap.render(lastRouteState, { forceFit: true });
+                    setStartZoneActionText(successMessage, false);
+                } catch (error) {
+                    setStartZoneActionText(error.message || "Request failed.", true);
+                }
+            }
+
+            document.getElementById("set-start-zone").addEventListener("click", function () {
+                const radiusMeters = readPositiveNumber("start-zone-radius-input");
+                const minimumLapSeconds = readPositiveNumber("minimum-lap-seconds-input");
+                if (radiusMeters === null || minimumLapSeconds === null) {
+                    setStartZoneActionText("Enter a positive radius and minimum lap time.", true);
+                    return;
+                }
+
+                sendStartZoneRequest(
+                    setStartZoneUrl,
+                    {
+                        radius_meters: radiusMeters,
+                        minimum_lap_seconds: minimumLapSeconds
+                    },
+                    "Start zone updated from the current GPS fix."
+                );
+            });
+
+            document.getElementById("clear-start-zone").addEventListener("click", function () {
+                sendStartZoneRequest(
+                    clearStartZoneUrl,
+                    undefined,
+                    "Start zone cleared."
+                );
+            });
 
             setInterval(refreshLiveState, 250);
             setInterval(refreshLiveRoute, 1000);
@@ -507,6 +682,14 @@ ROUTE_MAP_SCRIPT = """
             fillOpacity: 0.95
         });
 
+        const startZoneCircle = L.circle([0, 0], {
+            radius: 0,
+            color: "#2e7d32",
+            fillColor: "#66bb6a",
+            fillOpacity: 0.12,
+            weight: 2
+        });
+
         const hoverMarker = L.circleMarker([0, 0], {
             radius: 6,
             color: "#0d47a1",
@@ -597,7 +780,7 @@ ROUTE_MAP_SCRIPT = """
         });
         routeLine.on("mouseout", hideHoverMarker);
 
-        function fitMap(latLngs, currentLatLng, forceFit) {
+        function fitMap(latLngs, currentLatLng, startZoneLatLng, forceFit) {
             if (!(forceFit || followRoute || !hasView)) {
                 return;
             }
@@ -620,6 +803,12 @@ ROUTE_MAP_SCRIPT = """
                 return;
             }
 
+            if (startZoneLatLng) {
+                map.setView(startZoneLatLng, 17);
+                hasView = true;
+                return;
+            }
+
             if (!hasView) {
                 map.setView([39.7392, -104.9903], 12);
                 hasView = true;
@@ -635,10 +824,31 @@ ROUTE_MAP_SCRIPT = """
             const currentLatLng = isValidPoint(data && data.current_position)
                 ? toLatLng(data.current_position)
                 : null;
+            const startZone = (
+                isValidPoint(data && data.start_zone)
+                && Number.isFinite(data.start_zone.radius_meters)
+            )
+                ? data.start_zone
+                : null;
+            const startZoneLatLng = startZone ? toLatLng(startZone) : null;
             hoverPoints = points;
             hoverEnabled = Boolean(options.enablePointHover) && points.some(hasHoverDetails);
 
             routeLine.setLatLngs(latLngs);
+
+            if (startZone) {
+                startZoneCircle.setLatLng(startZoneLatLng);
+                startZoneCircle.setRadius(startZone.radius_meters);
+                startZoneCircle.bindTooltip(
+                    "Start zone (" + startZone.radius_meters.toFixed(1) + "m)",
+                    { permanent: false, direction: "top" }
+                );
+                if (!map.hasLayer(startZoneCircle)) {
+                    startZoneCircle.addTo(map);
+                }
+            } else {
+                removeLayerIfPresent(map, startZoneCircle);
+            }
 
             if (latLngs.length) {
                 setMarker(map, startMarker, latLngs[0], "Start");
@@ -668,7 +878,7 @@ ROUTE_MAP_SCRIPT = """
                 hideHoverMarker();
             }
 
-            fitMap(latLngs, currentLatLng, Boolean(opts.forceFit));
+            fitMap(latLngs, currentLatLng, startZoneLatLng, Boolean(opts.forceFit));
 
             if (statusElement) {
                 statusElement.textContent = buildStatusText(data, latLngs.length);
@@ -1123,6 +1333,47 @@ def _current_position(state):
     }
 
 
+def _start_zone_payload(state):
+    if not has_start_zone(state):
+        return None
+
+    return {
+        "latitude": round(state.start_zone_latitude, 6),
+        "longitude": round(state.start_zone_longitude, 6),
+        "radius_meters": round(state.start_zone_radius_meters, 1),
+    }
+
+
+def _start_zone_status_text(state):
+    if not has_start_zone(state):
+        return "Not set"
+
+    if not state.gps_has_fix or state.gps_latitude is None or state.gps_longitude is None:
+        return "Set. Waiting for GPS fix."
+
+    if not state.session_active:
+        return "Ready. Inside zone." if state.start_zone_inside else "Ready. Outside zone."
+
+    if not state.start_zone_departed:
+        return (
+            "Inside start zone. Leave the circle to arm lap detection."
+            if state.start_zone_inside
+            else "Outside start zone. Lap detection is arming."
+        )
+
+    if state.start_zone_anchor_monotonic is None:
+        return "Armed. Re-enter the circle to count a lap."
+
+    remaining_seconds = max(
+        0.0,
+        state.minimum_lap_seconds - (time.monotonic() - state.start_zone_anchor_monotonic),
+    )
+    if remaining_seconds > 0:
+        return f"Outside start zone. Next lap available in {remaining_seconds:.0f}s."
+
+    return "Armed. Re-enter the circle to count a lap."
+
+
 def _live_state_payload(state):
     started_text = (
         state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -1148,6 +1399,19 @@ def _live_state_payload(state):
         if state.gps_utc_date and state.gps_utc_time
         else "Unknown"
     )
+    start_zone = _start_zone_payload(state)
+    start_zone_center_text = (
+        f"{start_zone['latitude']:.6f}, {start_zone['longitude']:.6f}"
+        if start_zone
+        else "None"
+    )
+    start_zone_radius_text = f"{state.start_zone_radius_meters:.1f} m"
+    minimum_lap_text = f"{state.minimum_lap_seconds:.0f} s"
+    last_lap_text = (
+        f"{state.last_lap_elapsed_seconds:.1f}s from start"
+        if state.last_lap_elapsed_seconds is not None
+        else "None"
+    )
 
     return {
         "status": state.status,
@@ -1158,6 +1422,8 @@ def _live_state_payload(state):
         "elapsed_text": elapsed_text,
         "rpm_text": f"{state.rpm:.2f}",
         "count_text": str(state.count),
+        "lap_count_text": str(state.lap_count),
+        "last_lap_text": last_lap_text,
         "gps_has_fix": current_position is not None,
         "gps_latitude": current_position["latitude"] if current_position else None,
         "gps_longitude": current_position["longitude"] if current_position else None,
@@ -1166,6 +1432,13 @@ def _live_state_payload(state):
         "gps_longitude_text": gps_longitude_text,
         "gps_maps_url": gps_maps_url,
         "gps_time_text": gps_time_text,
+        "start_zone_active": start_zone is not None,
+        "start_zone_center_text": start_zone_center_text,
+        "start_zone_radius_text": start_zone_radius_text,
+        "start_zone_radius_value": round(state.start_zone_radius_meters, 1),
+        "minimum_lap_text": minimum_lap_text,
+        "minimum_lap_seconds_value": round(state.minimum_lap_seconds, 1),
+        "start_zone_status_text": _start_zone_status_text(state),
         "last_raw_gps_line": state.last_raw_gps_line,
         "last_raw_gpstime_line": state.last_raw_gpstime_line,
     }
@@ -1177,7 +1450,15 @@ def _live_route_payload(state):
         "session_active": state.session_active,
         "gps_has_fix": current_position is not None,
         "current_position": current_position,
+        "start_zone": _start_zone_payload(state),
         "route_points": [dict(point) for point in state.live_route_points],
+    }
+
+
+def _dashboard_update_payload(state):
+    return {
+        "live_state": _attach_session_urls(_live_state_payload(state)),
+        "route_state": _live_route_payload(state),
     }
 
 
@@ -1340,6 +1621,43 @@ def create_app(state):
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.post("/api/start-zone")
+    def set_start_zone():
+        payload = request.get_json(silent=True) or {}
+        current_position = _current_position(state)
+        if current_position is None:
+            return jsonify({"error": "A current GPS fix is required to set the start zone."}), 400
+
+        try:
+            radius_meters = float(payload.get("radius_meters", state.start_zone_radius_meters))
+            minimum_lap_seconds = float(
+                payload.get("minimum_lap_seconds", state.minimum_lap_seconds)
+            )
+        except (TypeError, ValueError):
+            return jsonify({"error": "Radius and minimum lap time must be numbers."}), 400
+
+        if radius_meters <= 0 or minimum_lap_seconds <= 0:
+            return jsonify({"error": "Radius and minimum lap time must be positive."}), 400
+
+        configure_start_zone(
+            state,
+            current_position["latitude"],
+            current_position["longitude"],
+            radius_meters,
+            minimum_lap_seconds,
+            now_monotonic=time.monotonic(),
+        )
+        response = jsonify(_dashboard_update_payload(state))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/start-zone/clear")
+    def clear_start_zone_route():
+        clear_start_zone(state)
+        response = jsonify(_dashboard_update_payload(state))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.route("/races")
     def race_list():
         race_files = _list_race_files()
@@ -1418,6 +1736,7 @@ def create_app(state):
                 "elapsed_seconds",
                 "count",
                 "rpm",
+                "lap_count",
                 "latitude",
                 "longitude",
                 "gps_fix",
