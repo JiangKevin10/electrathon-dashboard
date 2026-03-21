@@ -421,6 +421,52 @@ ROUTE_MAP_SCRIPT = """
             return "Waiting for GPS route data.";
         }
 
+        function hasHoverDetails(point) {
+            return Boolean(
+                point
+                && (
+                    Number.isFinite(point.elapsed_seconds)
+                    || Number.isFinite(point.rpm)
+                    || Number.isFinite(point.count)
+                    || (typeof point.timestamp === "string" && point.timestamp)
+                )
+            );
+        }
+
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>"']/g, function (char) {
+                return {
+                    "&": "&amp;",
+                    "<": "&lt;",
+                    ">": "&gt;",
+                    '"': "&quot;",
+                    "'": "&#39;"
+                }[char];
+            });
+        }
+
+        function buildPointTooltip(point) {
+            const lines = [];
+
+            if (Number.isFinite(point.elapsed_seconds)) {
+                lines.push("<b>Elapsed:</b> " + point.elapsed_seconds.toFixed(1) + "s");
+            }
+
+            if (Number.isFinite(point.rpm)) {
+                lines.push("<b>RPM:</b> " + point.rpm.toFixed(2));
+            }
+
+            if (Number.isFinite(point.count)) {
+                lines.push("<b>Count:</b> " + point.count);
+            }
+
+            if (typeof point.timestamp === "string" && point.timestamp) {
+                lines.push("<b>Recorded:</b> " + escapeHtml(point.timestamp));
+            }
+
+            return lines.join("<br>");
+        }
+
         const statusElement = document.getElementById(options.statusId);
         const map = L.map(options.containerId, {
             zoomControl: true,
@@ -434,7 +480,9 @@ ROUTE_MAP_SCRIPT = """
 
         const routeLine = L.polyline([], {
             color: "#1565c0",
-            weight: 4,
+            weight: 6,
+            lineCap: "round",
+            lineJoin: "round",
             opacity: 0.9
         }).addTo(map);
 
@@ -459,8 +507,19 @@ ROUTE_MAP_SCRIPT = """
             fillOpacity: 0.95
         });
 
+        const hoverMarker = L.circleMarker([0, 0], {
+            radius: 6,
+            color: "#0d47a1",
+            fillColor: "#42a5f5",
+            fillOpacity: 0.95,
+            weight: 2,
+            interactive: false
+        });
+
         let followRoute = true;
         let hasView = false;
+        let hoverPoints = [];
+        let hoverEnabled = false;
 
         map.on("dragstart", function () {
             followRoute = false;
@@ -468,7 +527,75 @@ ROUTE_MAP_SCRIPT = """
 
         map.on("zoomstart", function () {
             followRoute = false;
+            removeLayerIfPresent(map, hoverMarker);
         });
+
+        function hideHoverMarker() {
+            removeLayerIfPresent(map, hoverMarker);
+        }
+
+        function findNearestPoint(latlng) {
+            if (!hoverEnabled || !hoverPoints.length) {
+                return null;
+            }
+
+            const mousePoint = map.latLngToLayerPoint(latlng);
+            let nearestPoint = null;
+            let nearestDistance = Infinity;
+
+            for (const point of hoverPoints) {
+                const pointPixel = map.latLngToLayerPoint([point.latitude, point.longitude]);
+                const distance = mousePoint.distanceTo(pointPixel);
+
+                if (distance < nearestDistance) {
+                    nearestPoint = point;
+                    nearestDistance = distance;
+                }
+            }
+
+            if (nearestDistance > 18) {
+                return null;
+            }
+
+            return nearestPoint;
+        }
+
+        function updateHoverMarker(latlng) {
+            const point = findNearestPoint(latlng);
+            if (!point) {
+                hideHoverMarker();
+                return;
+            }
+
+            const tooltipHtml = buildPointTooltip(point);
+            if (!tooltipHtml) {
+                hideHoverMarker();
+                return;
+            }
+
+            hoverMarker.setLatLng([point.latitude, point.longitude]);
+
+            if (hoverMarker.getTooltip()) {
+                hoverMarker.setTooltipContent(tooltipHtml);
+            } else {
+                hoverMarker.bindTooltip(tooltipHtml, {
+                    permanent: false,
+                    direction: "top",
+                    opacity: 0.95
+                });
+            }
+
+            if (!map.hasLayer(hoverMarker)) {
+                hoverMarker.addTo(map);
+            }
+
+            hoverMarker.openTooltip();
+        }
+
+        routeLine.on("mousemove", function (event) {
+            updateHoverMarker(event.latlng);
+        });
+        routeLine.on("mouseout", hideHoverMarker);
 
         function fitMap(latLngs, currentLatLng, forceFit) {
             if (!(forceFit || followRoute || !hasView)) {
@@ -508,6 +635,8 @@ ROUTE_MAP_SCRIPT = """
             const currentLatLng = isValidPoint(data && data.current_position)
                 ? toLatLng(data.current_position)
                 : null;
+            hoverPoints = points;
+            hoverEnabled = Boolean(options.enablePointHover) && points.some(hasHoverDetails);
 
             routeLine.setLatLngs(latLngs);
 
@@ -533,6 +662,10 @@ ROUTE_MAP_SCRIPT = """
                 );
             } else {
                 removeLayerIfPresent(map, currentMarker);
+            }
+
+            if (!hoverEnabled) {
+                hideHoverMarker();
             }
 
             fitMap(latLngs, currentLatLng, Boolean(opts.forceFit));
@@ -878,16 +1011,17 @@ RACE_DETAIL_TEMPLATE = """
                 </article>
             </section>
 
-            <section class="card" style="margin-bottom: 18px;">
-                <div class="map-toolbar">
-                    <div>
-                        <h2 style="margin: 0 0 6px;">Route Map</h2>
-                        <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
-                    </div>
-                    <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
-                </div>
-                <div id="route-map"></div>
-            </section>
+             <section class="card" style="margin-bottom: 18px;">
+                 <div class="map-toolbar">
+                     <div>
+                         <h2 style="margin: 0 0 6px;">Route Map</h2>
+                         <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
+                     </div>
+                     <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                 </div>
+                 <div id="route-map"></div>
+                 <p class="meta" style="margin: 12px 0 0;">Hover over the route to inspect the nearest recorded RPM and elapsed time.</p>
+             </section>
 
             <section class="card">
                 <h2>Race Data</h2>
@@ -934,11 +1068,12 @@ RACE_DETAIL_TEMPLATE = """
                 route_points: {{ route_points|tojson }}
             };
 
-            const routeMap = createRouteMap({
-                containerId: "route-map",
-                statusId: "route-map-status",
-                pointsLabel: "saved route points"
-            });
+             const routeMap = createRouteMap({
+                 containerId: "route-map",
+                 statusId: "route-map-status",
+                 pointsLabel: "saved route points",
+                 enablePointHover: true
+             });
 
             routeMap.render(routeData, { forceFit: true });
 
@@ -1110,7 +1245,43 @@ def _extract_route_points(rows):
         except ValueError:
             continue
 
-        if route_points and route_points[-1] == point:
+        elapsed_text = str(row.get("elapsed_seconds", "") or "").strip()
+        if elapsed_text:
+            try:
+                point["elapsed_seconds"] = round(float(elapsed_text), 3)
+            except ValueError:
+                pass
+
+        rpm_text = str(row.get("rpm", "") or "").strip()
+        if rpm_text:
+            try:
+                point["rpm"] = round(float(rpm_text), 2)
+            except ValueError:
+                pass
+
+        count_text = str(row.get("count", "") or "").strip()
+        if count_text:
+            try:
+                point["count"] = int(count_text)
+            except ValueError:
+                pass
+
+        timestamp_text = str(row.get("timestamp", "") or "").strip()
+        if timestamp_text:
+            point["timestamp"] = timestamp_text
+
+        if (
+            route_points
+            and route_points[-1]["latitude"] == point["latitude"]
+            and route_points[-1]["longitude"] == point["longitude"]
+        ):
+            route_points[-1].update(
+                {
+                    key: value
+                    for key, value in point.items()
+                    if key not in {"latitude", "longitude"}
+                }
+            )
             continue
 
         route_points.append(point)
