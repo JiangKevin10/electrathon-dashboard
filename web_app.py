@@ -1,4 +1,5 @@
 import csv
+import re
 import time
 from datetime import datetime
 
@@ -17,6 +18,7 @@ from lap_tracker import clear_start_zone, configure_start_zone, has_start_zone
 
 CLEAR_HISTORY_PASSWORD = "lymanpassword"
 HIDDEN_RACE_COLUMNS = {"pps_locked", "pps_pulse_count", "pps_age_ms", "race_id", "source"}
+STORED_RACE_ID_PATTERN = re.compile(r"^[RS]\d{6}\.CSV$", re.IGNORECASE)
 HOME_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -283,10 +285,23 @@ HOME_TEMPLATE = """
                 <article class="card">
                     <h2>Stored Race Sync</h2>
                     <p class="detail-line">Status: <b id="sync-status-text">{{ live_state.sync_status_text }}</b></p>
+                    <div class="field-grid">
+                        <div>
+                            <label for="stored-race-delete-input">Race ID</label>
+                            <input
+                                id="stored-race-delete-input"
+                                type="text"
+                                placeholder="R000001.CSV"
+                                autocapitalize="characters"
+                                spellcheck="false"
+                            >
+                        </div>
+                    </div>
                     <div class="action-row">
                         <button class="map-action" id="sync-stored-races" type="button">Sync Stored Races</button>
+                        <button class="map-action secondary-action" id="delete-stored-race" type="button">Delete Stored Race</button>
                     </div>
-                    <p class="meta" id="sync-action-text">Import races saved on the Arduino SD card.</p>
+                    <p class="meta" id="sync-action-text">Import races saved on the Arduino SD card, or delete a bad stored race by ID.</p>
                 </article>
             </section>
 
@@ -356,6 +371,8 @@ HOME_TEMPLATE = """
             const setStartZoneUrl = {{ url_for("set_start_zone")|tojson }};
             const clearStartZoneUrl = {{ url_for("clear_start_zone_route")|tojson }};
             const syncStoredRacesUrl = {{ url_for("sync_stored_races")|tojson }};
+            const deleteStoredRaceUrl = {{ url_for("delete_stored_race")|tojson }};
+            let lastLiveState = {{ live_state|tojson }};
             const routeMap = createRouteMap({
                 containerId: "route-map",
                 statusId: "route-map-status",
@@ -416,15 +433,29 @@ HOME_TEMPLATE = """
                 target.style.color = isError ? "#8d1b1b" : "";
             }
 
-            function updateSyncButtonState(data) {
-                const button = document.getElementById("sync-stored-races");
-                const disabled = Boolean(data.sync_in_progress) || data.session_text === "RUNNING";
-                button.disabled = disabled;
-                button.textContent = data.sync_in_progress ? "Syncing..." : "Sync Stored Races";
+            function normalizeRaceId(value) {
+                return String(value || "").trim().toUpperCase();
+            }
+
+            function updateStoredRaceControlsState(data) {
+                const syncButton = document.getElementById("sync-stored-races");
+                const deleteButton = document.getElementById("delete-stored-race");
+                const deleteInput = document.getElementById("stored-race-delete-input");
+                const raceId = normalizeRaceId(deleteInput.value);
+                const busy = Boolean(data.sync_in_progress);
+                const sessionRunning = data.session_text === "RUNNING";
+
+                syncButton.disabled = busy || sessionRunning;
+                syncButton.textContent = busy ? "Working..." : "Sync Stored Races";
+
+                deleteInput.disabled = busy || sessionRunning;
+                deleteButton.disabled = busy || sessionRunning || !raceId;
+                deleteButton.textContent = busy ? "Working..." : "Delete Stored Race";
             }
 
             function applyLiveState(data, options) {
                 const opts = options || {};
+                lastLiveState = data;
                 document.getElementById("status-text").textContent = data.status;
                 document.getElementById("session-text").textContent = data.session_text;
                 document.getElementById("started-text").textContent = data.started_text;
@@ -447,7 +478,7 @@ HOME_TEMPLATE = """
                 updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                 updateRaceLink("last-file", data.last_session_name, data.last_session_url);
                 updateGpsLink(data.gps_maps_url);
-                updateSyncButtonState(data);
+                updateStoredRaceControlsState(data);
                 if (opts.syncControls) {
                     syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
                     syncNumberInput("minimum-lap-seconds-input", data.minimum_lap_seconds_value);
@@ -587,6 +618,44 @@ HOME_TEMPLATE = """
                     setSyncActionText(error.message || "Sync request failed.", true);
                 }
             });
+
+            document.getElementById("stored-race-delete-input").addEventListener("input", function () {
+                this.value = normalizeRaceId(this.value);
+                updateStoredRaceControlsState(lastLiveState);
+            });
+
+            document.getElementById("delete-stored-race").addEventListener("click", async function () {
+                const raceIdInput = document.getElementById("stored-race-delete-input");
+                const raceId = normalizeRaceId(raceIdInput.value);
+                if (!raceId) {
+                    setSyncActionText("Enter a stored race ID like R000001.CSV.", true);
+                    updateStoredRaceControlsState(lastLiveState);
+                    return;
+                }
+
+                setSyncActionText(`Requesting deletion of ${raceId}...`, false);
+
+                try {
+                    const response = await fetch(deleteStoredRaceUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ race_id: raceId })
+                    });
+                    const payload = await response.json().catch(function () {
+                        return {};
+                    });
+                    if (!response.ok) {
+                        throw new Error(payload.error || "Delete request failed.");
+                    }
+
+                    applyLiveState(payload.live_state);
+                    setSyncActionText(`Delete request queued for ${raceId}.`, false);
+                } catch (error) {
+                    setSyncActionText(error.message || "Delete request failed.", true);
+                }
+            });
+
+            applyLiveState(lastLiveState, { syncControls: true });
 
             setInterval(refreshLiveState, 250);
             setInterval(refreshLiveRoute, 1000);
@@ -1525,6 +1594,17 @@ def _attach_session_urls(payload):
     return payload
 
 
+def _normalize_stored_race_id(value):
+    race_id = str(value or "").strip().upper()
+    if not STORED_RACE_ID_PATTERN.fullmatch(race_id):
+        return None
+    return race_id
+
+
+def _stored_race_operation_pending(state):
+    return state.sync_in_progress or state.sync_requested or state.delete_requested_race_id is not None
+
+
 def _prepare_race_table(rows, fieldnames):
     display_rows = [dict(row) for row in rows]
     header_labels = {column: column for column in fieldnames}
@@ -1712,7 +1792,7 @@ def create_app(state):
         if not state.serial_connected:
             return jsonify({"error": "The Arduino is not connected."}), 400
 
-        if state.sync_in_progress or state.sync_requested:
+        if _stored_race_operation_pending(state):
             return jsonify({"error": "A stored-race sync is already running."}), 409
 
         if state.session_requested or state.session_active:
@@ -1720,6 +1800,28 @@ def create_app(state):
 
         state.sync_requested = True
         state.sync_status_text = "Sync requested. Waiting for the serial worker..."
+        response = jsonify(_dashboard_update_payload(state))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/delete-stored-race")
+    def delete_stored_race():
+        if not state.serial_connected:
+            return jsonify({"error": "The Arduino is not connected."}), 400
+
+        if _stored_race_operation_pending(state):
+            return jsonify({"error": "A stored-race operation is already running."}), 409
+
+        if state.session_requested or state.session_active:
+            return jsonify({"error": "Stop the current race before deleting stored races."}), 409
+
+        payload = request.get_json(silent=True) or {}
+        race_id = _normalize_stored_race_id(payload.get("race_id"))
+        if race_id is None:
+            return jsonify({"error": "Race ID must look like R000001.CSV or S000001.CSV."}), 400
+
+        state.delete_requested_race_id = race_id
+        state.sync_status_text = f"Delete requested for {race_id}. Waiting for the serial worker..."
         response = jsonify(_dashboard_update_payload(state))
         response.headers["Cache-Control"] = "no-store"
         return response

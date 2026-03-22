@@ -68,8 +68,12 @@ bool isRaceFilename(const char* filename, char prefix) {
   return filename[8] == 'C' && filename[9] == 'S' && filename[10] == 'V';
 }
 
+bool isAnyRaceFilename(const char* filename) {
+  return isRaceFilename(filename, 'R') || isRaceFilename(filename, 'S');
+}
+
 unsigned long extractRaceSequence(const char* filename) {
-  if (!(isRaceFilename(filename, 'R') || isRaceFilename(filename, 'S'))) {
+  if (!isAnyRaceFilename(filename)) {
     return 0;
   }
 
@@ -519,6 +523,36 @@ void acknowledgeRace(const char* raceId) {
   Serial.println(raceId);
 }
 
+void deleteStoredRace(const char* raceId) {
+  if (!sdReady) {
+    Serial.println(F("ERROR:SD_NOT_READY"));
+    return;
+  }
+
+  if (loggingState) {
+    Serial.println(F("ERROR:BUSY"));
+    return;
+  }
+
+  if (!isAnyRaceFilename(raceId)) {
+    Serial.println(F("ERROR:INVALID_RACE_ID"));
+    return;
+  }
+
+  if (!SD.exists(raceId)) {
+    Serial.println(F("ERROR:RACE_NOT_FOUND"));
+    return;
+  }
+
+  if (!SD.remove(raceId)) {
+    Serial.println(F("ERROR:DELETE_FAILED"));
+    return;
+  }
+
+  Serial.print(F("DELETE:OK:"));
+  Serial.println(raceId);
+}
+
 void processCommand(const char* command) {
   if (strcmp(command, "CMD:LIST") == 0) {
     sendRaceList();
@@ -532,6 +566,11 @@ void processCommand(const char* command) {
 
   if (strncmp(command, "ACK:", 4) == 0) {
     acknowledgeRace(command + 4);
+    return;
+  }
+
+  if (strncmp(command, "CMD:DELETE:", 11) == 0) {
+    deleteStoredRace(command + 11);
     return;
   }
 

@@ -201,6 +201,19 @@ def _acknowledge_race(ser, state, race_id):
             raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to ACK {race_id}.")
 
 
+def _delete_race_on_arduino(ser, state, race_id):
+    ser.reset_input_buffer()
+    _send_command(ser, f"CMD:DELETE:{race_id}")
+
+    while True:
+        line = _read_protocol_line(ser, state, SYNC_ACK_TIMEOUT_SECONDS)
+        if line == f"DELETE:OK:{race_id}":
+            return
+
+        if line.startswith("ERROR:"):
+            raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to delete {race_id}.")
+
+
 def _sync_stored_races(ser, state):
     state.sync_requested = False
 
@@ -211,6 +224,7 @@ def _sync_stored_races(ser, state):
     state.sync_in_progress = True
     imported_count = 0
     existing_count = 0
+    failed_races = []
 
     try:
         state.sync_status_text = "Checking the Arduino SD card for stored races..."
@@ -222,29 +236,63 @@ def _sync_stored_races(ser, state):
         zone_config = _current_start_zone_config(state)
         for index, race_id in enumerate(stored_races, start=1):
             state.sync_status_text = f"Syncing {race_id} ({index}/{len(stored_races)})..."
-            raw_lines = _receive_race_file(ser, state, race_id)
-            import_summary = archive_and_import_raw_race(
-                race_id,
-                raw_lines,
-                start_zone=zone_config,
-                radius_meters=state.start_zone_radius_meters,
-                minimum_lap_seconds=state.minimum_lap_seconds,
-            )
-            _acknowledge_race(ser, state, race_id)
+            try:
+                raw_lines = _receive_race_file(ser, state, race_id)
+                import_summary = archive_and_import_raw_race(
+                    race_id,
+                    raw_lines,
+                    start_zone=zone_config,
+                    radius_meters=state.start_zone_radius_meters,
+                    minimum_lap_seconds=state.minimum_lap_seconds,
+                )
+                _acknowledge_race(ser, state, race_id)
 
-            if import_summary["import_status"] == "imported":
-                imported_count += 1
-                state.last_session_filename = str(import_summary["final_path"])
-                state.last_session_name = import_summary["final_path"].name
-            else:
-                existing_count += 1
+                if import_summary["import_status"] == "imported":
+                    imported_count += 1
+                    state.last_session_filename = str(import_summary["final_path"])
+                    state.last_session_name = import_summary["final_path"].name
+                else:
+                    existing_count += 1
+            except Exception as exc:
+                failed_races.append(f"{race_id} ({exc})")
 
-        state.sync_status_text = (
-            f"Sync complete. Imported {imported_count} race(s); "
-            f"{existing_count} already existed on the Pi."
-        )
+        status_parts = [
+            f"Sync complete. Imported {imported_count} race(s).",
+            f"{existing_count} already existed on the Pi.",
+        ]
+        if failed_races:
+            preview = "; ".join(failed_races[:2])
+            if len(failed_races) > 2:
+                preview += f"; and {len(failed_races) - 2} more"
+            status_parts.append(f"Failed {len(failed_races)} race(s): {preview}.")
+
+        state.sync_status_text = " ".join(status_parts)
     except Exception as exc:
         state.sync_status_text = f"Sync failed: {exc}"
+    finally:
+        state.sync_in_progress = False
+
+
+def _delete_stored_race(ser, state):
+    race_id = state.delete_requested_race_id
+    state.delete_requested_race_id = None
+
+    if not race_id:
+        state.sync_status_text = "Delete request failed because no race ID was provided."
+        return
+
+    if state.session_requested or state.session_active:
+        state.sync_status_text = "Delete was skipped because a race is still running."
+        return
+
+    state.sync_in_progress = True
+
+    try:
+        state.sync_status_text = f"Deleting stored race {race_id}..."
+        _delete_race_on_arduino(ser, state, race_id)
+        state.sync_status_text = f"Deleted stored race {race_id} from the Arduino."
+    except Exception as exc:
+        state.sync_status_text = f"Delete failed for {race_id}: {exc}"
     finally:
         state.sync_in_progress = False
 
@@ -320,6 +368,14 @@ def run_serial_worker(state):
 
                 last_log_time = now
 
+            if state.delete_requested_race_id and not state.sync_in_progress:
+                _delete_stored_race(ser, state)
+                now = time.monotonic()
+                last_rpm_time = now
+                last_log_time = now
+                rpm_samples.clear()
+                rpm_samples.append((now, state.count))
+
             if state.sync_requested and not state.sync_in_progress:
                 _sync_stored_races(ser, state)
                 now = time.monotonic()
@@ -337,6 +393,7 @@ def run_serial_worker(state):
     finally:
         state.serial_connected = False
         state.sync_in_progress = False
+        state.delete_requested_race_id = None
         state.session_requested = False
         state.gps_latitude = None
         state.gps_longitude = None

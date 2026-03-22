@@ -83,7 +83,7 @@ def import_raw_race(
         raw_rows = list(reader)
 
     if not raw_rows:
-        raise ValueError(f"Raw race {race_id} is empty.")
+        raise ValueError(f"Raw race {race_id} has no sample rows.")
 
     if "elapsed_ms" not in raw_rows[0] or "count" not in raw_rows[0]:
         raise ValueError(f"Raw race {race_id} is missing required columns.")
