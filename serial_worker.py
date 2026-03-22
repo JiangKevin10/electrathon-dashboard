@@ -13,7 +13,7 @@ LOG_WRITE_INTERVAL = 1.0
 SYNC_LIST_TIMEOUT_SECONDS = 4.0
 SYNC_FILE_TIMEOUT_SECONDS = 30.0
 SYNC_ACK_TIMEOUT_SECONDS = 4.0
-DELETE_ALL_TIMEOUT_SECONDS = 15.0
+DELETE_ALL_TIMEOUT_SECONDS = 60.0
 
 
 def _append_live_route_point(state):
@@ -303,9 +303,29 @@ def _delete_race_on_arduino(ser, state, race_id):
 def _delete_all_races_on_arduino(ser, state):
     ser.reset_input_buffer()
     _send_command(ser, "CMD:DELETE_ALL")
+    delete_started = False
 
     while True:
         line = _read_protocol_line(ser, state, DELETE_ALL_TIMEOUT_SECONDS)
+        if line == "DELETEALL:BEGIN":
+            delete_started = True
+            state.sync_status_text = "Deleting all stored races from the Arduino..."
+            continue
+
+        if line.startswith("DELETEALL:PROGRESS:"):
+            delete_started = True
+            try:
+                deleted_count = int(line.split(":", 2)[2].strip())
+            except ValueError:
+                deleted_count = None
+
+            if deleted_count is not None:
+                state.sync_status_text = (
+                    f"Deleting all stored races from the Arduino... "
+                    f"{deleted_count} deleted so far."
+                )
+            continue
+
         if line.startswith("DELETEALL:OK:"):
             try:
                 return int(line.split(":", 2)[2].strip())
@@ -314,6 +334,9 @@ def _delete_all_races_on_arduino(ser, state):
 
         if line.startswith("ERROR:"):
             raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino failed to delete all stored races.")
+
+        if delete_started:
+            continue
 
 
 def _sync_stored_races(ser, state):

@@ -34,6 +34,7 @@ unsigned long lastGpsNoFixReportTime = 0;
 unsigned long lastRawLogTime = 0;
 unsigned long raceStartMillis = 0;
 unsigned long raceStartCount = 0;
+unsigned long lastBackgroundTelemetryTime = 0;
 
 char currentRaceFilename[12] = "";
 char commandBuffer[32] = "";
@@ -395,6 +396,23 @@ void sendGpsUpdates(unsigned long now) {
   }
 }
 
+void serviceGpsInput() {
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+}
+
+void serviceBackgroundTelemetry() {
+  const unsigned long now = millis();
+  if (now - lastBackgroundTelemetryTime < 250) {
+    return;
+  }
+
+  sendDashboardState(now);
+  sendGpsUpdates(now);
+  lastBackgroundTelemetryTime = now;
+}
+
 void sendRaceList() {
   if (!sdReady) {
     Serial.println(F("ERROR:SD_NOT_READY"));
@@ -462,6 +480,7 @@ void sendRaceFile(const char* raceId) {
   char lineBuffer[96];
   byte lineLength = 0;
   while (file.available()) {
+    serviceGpsInput();
     const char value = static_cast<char>(file.read());
     if (value == '\r') {
       continue;
@@ -478,6 +497,8 @@ void sendRaceFile(const char* raceId) {
     if (lineLength < sizeof(lineBuffer) - 1) {
       lineBuffer[lineLength++] = value;
     }
+
+    serviceBackgroundTelemetry();
   }
 
   if (lineLength > 0) {
@@ -565,9 +586,12 @@ int deleteAllStoredRaces() {
   }
 
   int deletedCount = 0;
+  Serial.println(F("DELETEALL:BEGIN"));
 
   while (true) {
     char filenameToDelete[16] = "";
+    serviceGpsInput();
+    serviceBackgroundTelemetry();
     File root = SD.open("/");
     if (!root) {
       Serial.println(F("ERROR:SD_OPEN_FAILED"));
@@ -575,6 +599,7 @@ int deleteAllStoredRaces() {
     }
 
     while (true) {
+      serviceGpsInput();
       File entry = root.openNextFile();
       if (!entry) {
         break;
@@ -603,6 +628,9 @@ int deleteAllStoredRaces() {
     }
 
     deletedCount++;
+    serviceBackgroundTelemetry();
+    Serial.print(F("DELETEALL:PROGRESS:"));
+    Serial.println(deletedCount);
   }
 
   Serial.print(F("DELETEALL:OK:"));
@@ -690,9 +718,7 @@ void setup() {
 }
 
 void loop() {
-  while (gpsSerial.available() > 0) {
-    gps.encode(gpsSerial.read());
-  }
+  serviceGpsInput();
 
   handleSerialCommands();
   handleButtonState();
