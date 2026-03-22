@@ -36,10 +36,20 @@ def archive_and_import_raw_race(
     radius_meters=DEFAULT_START_ZONE_RADIUS_METERS,
     minimum_lap_seconds=DEFAULT_MINIMUM_LAP_SECONDS,
 ):
-    raw_path, raw_created = archive_raw_race(race_id, raw_lines)
+    raw_rows = _parse_raw_lines(raw_lines)
+    if not raw_rows:
+        raise ValueError(f"Raw race {race_id} has no sample rows.")
+
+    if "elapsed_ms" not in raw_rows[0] or "count" not in raw_rows[0]:
+        raise ValueError(f"Raw race {race_id} is missing required columns.")
+
+    race_start_timestamp = _estimate_race_start_datetime(raw_rows)
+    raw_path, raw_created = archive_raw_race(race_id, raw_lines, race_start_timestamp)
     final_path, import_status = import_raw_race(
         race_id,
         raw_path,
+        raw_rows=raw_rows,
+        race_start_timestamp=race_start_timestamp,
         start_zone=start_zone,
         radius_meters=radius_meters,
         minimum_lap_seconds=minimum_lap_seconds,
@@ -52,9 +62,9 @@ def archive_and_import_raw_race(
     }
 
 
-def archive_raw_race(race_id, raw_lines):
+def archive_raw_race(race_id, raw_lines, race_start_timestamp):
     RAW_LOG_FOLDER.mkdir(parents=True, exist_ok=True)
-    raw_path = RAW_LOG_FOLDER / f"{_race_slug(race_id)}.csv"
+    raw_path = RAW_LOG_FOLDER / f"{_build_race_stem(race_id, race_start_timestamp)}.csv"
 
     if raw_path.exists():
         return raw_path, False
@@ -70,17 +80,16 @@ def archive_raw_race(race_id, raw_lines):
 def import_raw_race(
     race_id,
     raw_path,
+    raw_rows=None,
+    race_start_timestamp=None,
     start_zone=None,
     radius_meters=DEFAULT_START_ZONE_RADIUS_METERS,
     minimum_lap_seconds=DEFAULT_MINIMUM_LAP_SECONDS,
 ):
-    existing_path = find_existing_race_file(race_id)
-    if existing_path is not None:
-        return existing_path, "existing"
-
-    with raw_path.open("r", newline="", encoding="utf-8") as file:
-        reader = csv.DictReader(file)
-        raw_rows = list(reader)
+    if raw_rows is None:
+        with raw_path.open("r", newline="", encoding="utf-8") as file:
+            reader = csv.DictReader(file)
+            raw_rows = list(reader)
 
     if not raw_rows:
         raise ValueError(f"Raw race {race_id} has no sample rows.")
@@ -88,7 +97,12 @@ def import_raw_race(
     if "elapsed_ms" not in raw_rows[0] or "count" not in raw_rows[0]:
         raise ValueError(f"Raw race {race_id} is missing required columns.")
 
-    race_start_timestamp = _estimate_race_start_datetime(raw_rows)
+    if race_start_timestamp is None:
+        race_start_timestamp = _estimate_race_start_datetime(raw_rows)
+
+    existing_path = find_existing_race_file(race_id, race_start_timestamp)
+    if existing_path is not None:
+        return existing_path, "existing"
     final_rows = _build_imported_rows(
         race_id,
         raw_rows,
@@ -110,29 +124,13 @@ def import_raw_race(
     return final_path, "imported"
 
 
-def find_existing_race_file(race_id):
+def find_existing_race_file(race_id, race_start_timestamp):
     LOG_FOLDER.mkdir(parents=True, exist_ok=True)
-    race_slug = _race_slug(race_id)
+    race_stem = _build_race_stem(race_id, race_start_timestamp)
 
-    for path in LOG_FOLDER.glob(f"*_{race_slug}.csv"):
+    for path in LOG_FOLDER.glob(f"{race_stem}*.csv"):
         if path.is_file():
             return path
-
-    for path in LOG_FOLDER.glob("*.csv"):
-        if not path.is_file():
-            continue
-
-        try:
-            with path.open("r", newline="", encoding="utf-8") as file:
-                reader = csv.DictReader(file)
-                if not reader.fieldnames or "race_id" not in reader.fieldnames:
-                    continue
-
-                for row in reader:
-                    if str(row.get("race_id", "")).strip() == race_id:
-                        return path
-        except OSError:
-            continue
 
     return None
 
@@ -295,8 +293,7 @@ def _build_lap_state(zone, first_valid_point):
 
 
 def _build_final_race_path(race_id, race_start_timestamp):
-    timestamp_text = race_start_timestamp.strftime("%Y-%m-%d_%H-%M-%S")
-    base_name = f"race_{timestamp_text}_{_race_slug(race_id)}"
+    base_name = _build_race_stem(race_id, race_start_timestamp)
     candidate = LOG_FOLDER / f"{base_name}.csv"
     suffix = 1
 
@@ -324,6 +321,16 @@ def _race_slug(race_id):
     if race_id_text.lower().endswith(".csv"):
         return race_id_text[:-4]
     return race_id_text or "unknown_race"
+
+
+def _build_race_stem(race_id, race_start_timestamp):
+    timestamp_text = race_start_timestamp.strftime("%Y-%m-%d_%H-%M-%S")
+    return f"race_{timestamp_text}_{_race_slug(race_id)}"
+
+
+def _parse_raw_lines(raw_lines):
+    reader = csv.DictReader(raw_lines)
+    return list(reader)
 
 
 def _parse_bool(value):

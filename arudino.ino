@@ -638,7 +638,21 @@ int deleteAllStoredRaces() {
   return deletedCount;
 }
 
-void processCommand(const char* command) {
+void trimCommand(char* command) {
+  while (command[0] == ' ' || command[0] == '\t') {
+    memmove(command, command + 1, strlen(command));
+  }
+
+  size_t length = strlen(command);
+  while (length > 0 && (command[length - 1] == ' ' || command[length - 1] == '\t')) {
+    command[length - 1] = '\0';
+    length--;
+  }
+}
+
+void processCommand(char* command) {
+  trimCommand(command);
+
   if (strcmp(command, "CMD:LIST") == 0) {
     sendRaceList();
     return;
@@ -664,7 +678,8 @@ void processCommand(const char* command) {
     return;
   }
 
-  Serial.println(F("ERROR:UNKNOWN_COMMAND"));
+  Serial.print(F("ERROR:UNKNOWN_COMMAND:"));
+  Serial.println(command);
 }
 
 void handleSerialCommands() {
