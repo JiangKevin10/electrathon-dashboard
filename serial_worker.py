@@ -4,11 +4,15 @@ import serial
 import time
 from config import PORT, BAUD, MAGNETS_PER_REV
 from csv_logger import start_session_log, write_session_row, stop_session_log
-from lap_tracker import reset_lap_tracking, update_lap_tracking
+from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
+from race_importer import archive_and_import_raw_race
 
 RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
+SYNC_LIST_TIMEOUT_SECONDS = 4.0
+SYNC_FILE_TIMEOUT_SECONDS = 10.0
+SYNC_ACK_TIMEOUT_SECONDS = 4.0
 
 
 def _append_live_route_point(state):
@@ -28,15 +32,234 @@ def _append_live_route_point(state):
     state.live_route_points.append(point)
 
 
+def _handle_live_serial_line(state, line, now):
+    if line.startswith("COUNT:"):
+        try:
+            state.count = int(line.split(":", 1)[1])
+        except ValueError:
+            pass
+        return True
+
+    if line.startswith("LOG:"):
+        try:
+            state.session_requested = (int(line.split(":", 1)[1]) == 1)
+        except ValueError:
+            pass
+        return True
+
+    if line.startswith("RACEFILE:"):
+        race_id = line.split(":", 1)[1].strip()
+        state.current_race_id = race_id or None
+        return True
+
+    if line.startswith("GPS:"):
+        print(f"[ARDUINO] {line}")
+        state.last_raw_gps_line = line
+        gps_payload = line.split(":", 1)[1].strip()
+        if gps_payload == "NOFIX":
+            state.gps_latitude = None
+            state.gps_longitude = None
+            state.gps_has_fix = False
+            state.gps_satellites = 0
+            return True
+
+        gps_parts = gps_payload.split(",")
+        if len(gps_parts) >= 3:
+            try:
+                state.gps_latitude = float(gps_parts[0])
+                state.gps_longitude = float(gps_parts[1])
+                state.gps_satellites = int(gps_parts[2])
+                state.gps_has_fix = True
+                if state.session_active and state.session_started_monotonic is not None:
+                    state.session_elapsed_seconds = now - state.session_started_monotonic
+                update_lap_tracking(state, now)
+                _append_live_route_point(state)
+            except ValueError:
+                pass
+        return True
+
+    if line.startswith("GPSTIME:"):
+        print(f"[ARDUINO] {line}")
+        state.last_raw_gpstime_line = line
+        time_payload = line.split(":", 1)[1].strip()
+        if time_payload == "NOFIX":
+            state.gps_utc_date = None
+            state.gps_utc_time = None
+            return True
+
+        time_parts = time_payload.split(",")
+        if len(time_parts) >= 2:
+            state.gps_utc_date = time_parts[0]
+            state.gps_utc_time = time_parts[1]
+        return True
+
+    return False
+
+
+def _send_command(ser, command_text):
+    ser.write(f"{command_text}\n".encode("utf-8"))
+    ser.flush()
+
+
+def _read_protocol_line(ser, state, timeout_seconds):
+    deadline = time.monotonic() + timeout_seconds
+
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("utf-8", errors="ignore").strip()
+        now = time.monotonic()
+        if not line:
+            continue
+
+        if _handle_live_serial_line(state, line, now):
+            continue
+
+        return line
+
+    raise TimeoutError("Timed out waiting for the Arduino response.")
+
+
+def _current_start_zone_config(state):
+    if not has_start_zone(state):
+        return None
+
+    return {
+        "latitude": state.start_zone_latitude,
+        "longitude": state.start_zone_longitude,
+        "radius_meters": state.start_zone_radius_meters,
+        "minimum_lap_seconds": state.minimum_lap_seconds,
+    }
+
+
+def _request_stored_races(ser, state):
+    ser.reset_input_buffer()
+    _send_command(ser, "CMD:LIST")
+    races = []
+    list_started = False
+
+    while True:
+        line = _read_protocol_line(ser, state, SYNC_LIST_TIMEOUT_SECONDS)
+
+        if line == "LIST:BEGIN":
+            list_started = True
+            continue
+
+        if line == "LIST:END":
+            if not list_started:
+                raise RuntimeError("Arduino ended the race list before starting it.")
+            return races
+
+        if line.startswith("LIST:ITEM:"):
+            payload = line.split(":", 2)[2]
+            race_id = payload.split(",", 1)[0].strip()
+            if race_id:
+                races.append(race_id)
+            continue
+
+        if line.startswith("ERROR:"):
+            raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino list command failed.")
+
+
+def _receive_race_file(ser, state, race_id):
+    ser.reset_input_buffer()
+    _send_command(ser, f"CMD:SEND:{race_id}")
+    raw_lines = []
+    file_started = False
+
+    while True:
+        line = _read_protocol_line(ser, state, SYNC_FILE_TIMEOUT_SECONDS)
+
+        if line.startswith("FILE:BEGIN:"):
+            payload = line.split(":", 2)[2]
+            if not payload.startswith(race_id):
+                raise RuntimeError(f"Arduino started sending the wrong race: {payload}")
+            file_started = True
+            continue
+
+        if line.startswith("FILE:DATA:"):
+            raw_lines.append(line.split(":", 2)[2])
+            continue
+
+        if line == f"FILE:END:{race_id}":
+            if not file_started:
+                raise RuntimeError(f"Arduino ended race {race_id} before it started sending data.")
+            return raw_lines
+
+        if line.startswith("ERROR:"):
+            raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino could not send {race_id}.")
+
+
+def _acknowledge_race(ser, state, race_id):
+    ser.reset_input_buffer()
+    _send_command(ser, f"ACK:{race_id}")
+
+    while True:
+        line = _read_protocol_line(ser, state, SYNC_ACK_TIMEOUT_SECONDS)
+        if line == f"ACK:OK:{race_id}":
+            return
+
+        if line.startswith("ERROR:"):
+            raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to ACK {race_id}.")
+
+
+def _sync_stored_races(ser, state):
+    state.sync_requested = False
+
+    if state.session_requested or state.session_active:
+        state.sync_status_text = "Sync was skipped because a race is still running."
+        return
+
+    state.sync_in_progress = True
+    imported_count = 0
+    existing_count = 0
+
+    try:
+        state.sync_status_text = "Checking the Arduino SD card for stored races..."
+        stored_races = _request_stored_races(ser, state)
+        if not stored_races:
+            state.sync_status_text = "Sync complete. No stored races were waiting on the Arduino."
+            return
+
+        zone_config = _current_start_zone_config(state)
+        for index, race_id in enumerate(stored_races, start=1):
+            state.sync_status_text = f"Syncing {race_id} ({index}/{len(stored_races)})..."
+            raw_lines = _receive_race_file(ser, state, race_id)
+            import_summary = archive_and_import_raw_race(
+                race_id,
+                raw_lines,
+                start_zone=zone_config,
+                radius_meters=state.start_zone_radius_meters,
+                minimum_lap_seconds=state.minimum_lap_seconds,
+            )
+            _acknowledge_race(ser, state, race_id)
+
+            if import_summary["import_status"] == "imported":
+                imported_count += 1
+                state.last_session_filename = str(import_summary["final_path"])
+                state.last_session_name = import_summary["final_path"].name
+            else:
+                existing_count += 1
+
+        state.sync_status_text = (
+            f"Sync complete. Imported {imported_count} race(s); "
+            f"{existing_count} already existed on the Pi."
+        )
+    except Exception as exc:
+        state.sync_status_text = f"Sync failed: {exc}"
+    finally:
+        state.sync_in_progress = False
+
+
 def run_serial_worker(state):
     try:
         ser = serial.Serial(PORT, BAUD, timeout=0.1)
         time.sleep(2)
         ser.reset_input_buffer()
+        state.serial_connected = True
         state.status = f"Connected to {PORT}"
         print(state.status)
-    except Exception as e:
-        state.status = f"Serial error: {e}"
+    except Exception as exc:
+        state.serial_connected = False
+        state.status = f"Serial error: {exc}"
         print(state.status)
         return
 
@@ -50,54 +273,8 @@ def run_serial_worker(state):
             line = ser.readline().decode("utf-8", errors="ignore").strip()
             now = time.monotonic()
 
-            if line.startswith("COUNT:"):
-                try:
-                    state.count = int(line.split(":")[1])
-                except ValueError:
-                    pass
-
-            elif line.startswith("LOG:"):
-                try:
-                    state.session_requested = (int(line.split(":")[1]) == 1)
-                except ValueError:
-                    pass
-
-            elif line.startswith("GPS:"):
-                print(f"[ARDUINO] {line}")
-                state.last_raw_gps_line = line
-                gps_payload = line.split(":", 1)[1].strip()
-                if gps_payload == "NOFIX":
-                    state.gps_latitude = None
-                    state.gps_longitude = None
-                    state.gps_has_fix = False
-                    state.gps_satellites = 0
-                else:
-                    gps_parts = gps_payload.split(",")
-                    if len(gps_parts) >= 3:
-                        try:
-                            state.gps_latitude = float(gps_parts[0])
-                            state.gps_longitude = float(gps_parts[1])
-                            state.gps_satellites = int(gps_parts[2])
-                            state.gps_has_fix = True
-                            if state.session_active and state.session_started_monotonic is not None:
-                                state.session_elapsed_seconds = now - state.session_started_monotonic
-                            update_lap_tracking(state, now)
-                            _append_live_route_point(state)
-                        except ValueError:
-                            pass
-
-            elif line.startswith("GPSTIME:"):
-                print(f"[ARDUINO] {line}")
-                state.last_raw_gpstime_line = line
-                time_payload = line.split(":", 1)[1].strip()
-                if time_payload == "NOFIX":
-                    state.gps_utc_date = None
-                    state.gps_utc_time = None
-                else:
-                    time_parts = time_payload.split(",")
-                    if len(time_parts) >= 2:
-                        state.gps_utc_date = time_parts[0]
-                        state.gps_utc_time = time_parts[1]
+            if line:
+                _handle_live_serial_line(state, line, now)
 
             if state.count < rpm_samples[-1][1]:
                 rpm_samples.clear()
@@ -115,6 +292,7 @@ def run_serial_worker(state):
 
             if not state.session_requested and last_session_requested:
                 stop_session_log(state)
+                state.current_race_id = None
 
             if state.session_active and state.session_started_monotonic is not None:
                 state.session_elapsed_seconds = now - state.session_started_monotonic
@@ -142,13 +320,23 @@ def run_serial_worker(state):
 
                 last_log_time = now
 
+            if state.sync_requested and not state.sync_in_progress:
+                _sync_stored_races(ser, state)
+                now = time.monotonic()
+                last_rpm_time = now
+                last_log_time = now
+                rpm_samples.clear()
+                rpm_samples.append((now, state.count))
+
             last_session_requested = state.session_requested
             time.sleep(0.01)
 
-    except Exception as e:
-        state.status = f"Serial worker stopped: {e}"
+    except Exception as exc:
+        state.status = f"Serial worker stopped: {exc}"
         print(state.status)
     finally:
+        state.serial_connected = False
+        state.sync_in_progress = False
         state.session_requested = False
         state.gps_latitude = None
         state.gps_longitude = None
@@ -159,6 +347,7 @@ def run_serial_worker(state):
         state.last_raw_gps_line = "Waiting for GPS serial data"
         state.last_raw_gpstime_line = "Waiting for GPS time data"
         state.live_route_points = []
+        state.current_race_id = None
         reset_lap_tracking(state)
         stop_session_log(state)
         ser.close()

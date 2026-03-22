@@ -16,7 +16,7 @@ from config import LOG_FOLDER
 from lap_tracker import clear_start_zone, configure_start_zone, has_start_zone
 
 CLEAR_HISTORY_PASSWORD = "lymanpassword"
-HIDDEN_RACE_COLUMNS = {"pps_locked", "pps_pulse_count", "pps_age_ms"}
+HIDDEN_RACE_COLUMNS = {"pps_locked", "pps_pulse_count", "pps_age_ms", "race_id", "source"}
 HOME_TEMPLATE = """
 <!doctype html>
 <html lang="en">
@@ -279,6 +279,15 @@ HOME_TEMPLATE = """
                         </a>
                     </p>
                 </article>
+
+                <article class="card">
+                    <h2>Stored Race Sync</h2>
+                    <p class="detail-line">Status: <b id="sync-status-text">{{ live_state.sync_status_text }}</b></p>
+                    <div class="action-row">
+                        <button class="map-action" id="sync-stored-races" type="button">Sync Stored Races</button>
+                    </div>
+                    <p class="meta" id="sync-action-text">Import races saved on the Arduino SD card.</p>
+                </article>
             </section>
 
             <section class="card map-card">
@@ -346,6 +355,7 @@ HOME_TEMPLATE = """
             const liveRouteUrl = {{ url_for("live_route")|tojson }};
             const setStartZoneUrl = {{ url_for("set_start_zone")|tojson }};
             const clearStartZoneUrl = {{ url_for("clear_start_zone_route")|tojson }};
+            const syncStoredRacesUrl = {{ url_for("sync_stored_races")|tojson }};
             const routeMap = createRouteMap({
                 containerId: "route-map",
                 statusId: "route-map-status",
@@ -400,6 +410,19 @@ HOME_TEMPLATE = """
                 target.style.color = isError ? "#8d1b1b" : "";
             }
 
+            function setSyncActionText(text, isError) {
+                const target = document.getElementById("sync-action-text");
+                target.textContent = text;
+                target.style.color = isError ? "#8d1b1b" : "";
+            }
+
+            function updateSyncButtonState(data) {
+                const button = document.getElementById("sync-stored-races");
+                const disabled = Boolean(data.sync_in_progress) || data.session_text === "RUNNING";
+                button.disabled = disabled;
+                button.textContent = data.sync_in_progress ? "Syncing..." : "Sync Stored Races";
+            }
+
             function applyLiveState(data, options) {
                 const opts = options || {};
                 document.getElementById("status-text").textContent = data.status;
@@ -420,9 +443,11 @@ HOME_TEMPLATE = """
                 document.getElementById("minimum-lap-text").textContent = data.minimum_lap_text;
                 document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
                 document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                document.getElementById("sync-status-text").textContent = data.sync_status_text;
                 updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                 updateRaceLink("last-file", data.last_session_name, data.last_session_url);
                 updateGpsLink(data.gps_maps_url);
+                updateSyncButtonState(data);
                 if (opts.syncControls) {
                     syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
                     syncNumberInput("minimum-lap-seconds-input", data.minimum_lap_seconds_value);
@@ -542,6 +567,25 @@ HOME_TEMPLATE = """
                     undefined,
                     "Start zone cleared."
                 );
+            });
+
+            document.getElementById("sync-stored-races").addEventListener("click", async function () {
+                setSyncActionText("Requesting stored races from the Arduino...", false);
+
+                try {
+                    const response = await fetch(syncStoredRacesUrl, { method: "POST" });
+                    const payload = await response.json().catch(function () {
+                        return {};
+                    });
+                    if (!response.ok) {
+                        throw new Error(payload.error || "Sync request failed.");
+                    }
+
+                    applyLiveState(payload.live_state);
+                    setSyncActionText("Sync request queued. Progress will appear above.", false);
+                } catch (error) {
+                    setSyncActionText(error.message || "Sync request failed.", true);
+                }
             });
 
             setInterval(refreshLiveState, 250);
@@ -1444,6 +1488,8 @@ def _live_state_payload(state):
         "start_zone_status_text": _start_zone_status_text(state),
         "last_raw_gps_line": state.last_raw_gps_line,
         "last_raw_gpstime_line": state.last_raw_gpstime_line,
+        "sync_status_text": state.sync_status_text,
+        "sync_in_progress": state.sync_in_progress,
     }
 
 
@@ -1657,6 +1703,23 @@ def create_app(state):
     @app.post("/api/start-zone/clear")
     def clear_start_zone_route():
         clear_start_zone(state)
+        response = jsonify(_dashboard_update_payload(state))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/sync-stored-races")
+    def sync_stored_races():
+        if not state.serial_connected:
+            return jsonify({"error": "The Arduino is not connected."}), 400
+
+        if state.sync_in_progress or state.sync_requested:
+            return jsonify({"error": "A stored-race sync is already running."}), 409
+
+        if state.session_requested or state.session_active:
+            return jsonify({"error": "Stop the current race before syncing stored races."}), 409
+
+        state.sync_requested = True
+        state.sync_status_text = "Sync requested. Waiting for the serial worker..."
         response = jsonify(_dashboard_update_payload(state))
         response.headers["Cache-Control"] = "no-store"
         return response

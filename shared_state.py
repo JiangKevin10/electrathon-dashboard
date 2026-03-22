@@ -16,10 +16,12 @@ class SharedState:
         self.session_requested = False
         self.session_active = False
         self.status = "Starting..."
+        self.serial_connected = False
         self.current_session_filename = None
         self.current_session_name = None
         self.last_session_filename = None
         self.last_session_name = None
+        self.current_race_id = None
         self.session_started_at = None
         self.session_started_monotonic = None
         self.session_elapsed_seconds = 0.0
@@ -33,3 +35,6 @@ class SharedState:
         self.start_zone_anchor_monotonic = None
         self.lap_count = 0
         self.last_lap_elapsed_seconds = None
+        self.sync_requested = False
+        self.sync_in_progress = False
+        self.sync_status_text = "Idle. Stored races have not been synced yet."
