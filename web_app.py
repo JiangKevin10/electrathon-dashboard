@@ -201,6 +201,20 @@ HOME_TEMPLATE = """
                 color: var(--text);
             }
 
+            .progress-shell {
+                margin-top: 10px;
+                padding: 12px;
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                background: #f7fafc;
+            }
+
+            .progress-shell progress {
+                width: 100%;
+                height: 14px;
+                margin: 8px 0 6px;
+            }
+
             code {
                 white-space: pre-wrap;
                 word-break: break-word;
@@ -300,6 +314,12 @@ HOME_TEMPLATE = """
                     <div class="action-row">
                         <button class="map-action" id="sync-stored-races" type="button">Sync Stored Races</button>
                         <button class="map-action secondary-action" id="delete-stored-race" type="button">Delete Stored Race</button>
+                        <button class="map-action secondary-action" id="delete-all-stored-races" type="button">Delete All Stored Races</button>
+                    </div>
+                    <div class="progress-shell" id="sync-progress-panel" {% if not live_state.sync_progress_active %}hidden{% endif %}>
+                        <p class="detail-line">Current Race: <b id="sync-current-race-text">{{ live_state.sync_current_race_text }}</b></p>
+                        <progress id="sync-progress-bar" max="1" value="{{ live_state.sync_progress_fraction }}"></progress>
+                        <p class="meta" id="sync-progress-meta">{{ live_state.sync_progress_meta_text }}</p>
                     </div>
                     <p class="meta" id="sync-action-text">Import races saved on the Arduino SD card, or delete a bad stored race by ID.</p>
                 </article>
@@ -372,6 +392,7 @@ HOME_TEMPLATE = """
             const clearStartZoneUrl = {{ url_for("clear_start_zone_route")|tojson }};
             const syncStoredRacesUrl = {{ url_for("sync_stored_races")|tojson }};
             const deleteStoredRaceUrl = {{ url_for("delete_stored_race")|tojson }};
+            const deleteAllStoredRacesUrl = {{ url_for("delete_all_stored_races")|tojson }};
             let lastLiveState = {{ live_state|tojson }};
             const routeMap = createRouteMap({
                 containerId: "route-map",
@@ -440,6 +461,7 @@ HOME_TEMPLATE = """
             function updateStoredRaceControlsState(data) {
                 const syncButton = document.getElementById("sync-stored-races");
                 const deleteButton = document.getElementById("delete-stored-race");
+                const deleteAllButton = document.getElementById("delete-all-stored-races");
                 const deleteInput = document.getElementById("stored-race-delete-input");
                 const raceId = normalizeRaceId(deleteInput.value);
                 const busy = Boolean(data.sync_in_progress);
@@ -451,6 +473,20 @@ HOME_TEMPLATE = """
                 deleteInput.disabled = busy || sessionRunning;
                 deleteButton.disabled = busy || sessionRunning || !raceId;
                 deleteButton.textContent = busy ? "Working..." : "Delete Stored Race";
+                deleteAllButton.disabled = busy || sessionRunning;
+                deleteAllButton.textContent = busy ? "Working..." : "Delete All Stored Races";
+            }
+
+            function updateSyncProgress(data) {
+                const panel = document.getElementById("sync-progress-panel");
+                const raceText = document.getElementById("sync-current-race-text");
+                const progressBar = document.getElementById("sync-progress-bar");
+                const progressMeta = document.getElementById("sync-progress-meta");
+
+                panel.hidden = !data.sync_progress_active;
+                raceText.textContent = data.sync_current_race_text;
+                progressBar.value = Number.isFinite(data.sync_progress_fraction) ? data.sync_progress_fraction : 0;
+                progressMeta.textContent = data.sync_progress_meta_text;
             }
 
             function applyLiveState(data, options) {
@@ -478,6 +514,7 @@ HOME_TEMPLATE = """
                 updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                 updateRaceLink("last-file", data.last_session_name, data.last_session_url);
                 updateGpsLink(data.gps_maps_url);
+                updateSyncProgress(data);
                 updateStoredRaceControlsState(data);
                 if (opts.syncControls) {
                     syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
@@ -652,6 +689,29 @@ HOME_TEMPLATE = """
                     setSyncActionText(`Delete request queued for ${raceId}.`, false);
                 } catch (error) {
                     setSyncActionText(error.message || "Delete request failed.", true);
+                }
+            });
+
+            document.getElementById("delete-all-stored-races").addEventListener("click", async function () {
+                if (!window.confirm("Delete all stored races from the Arduino SD card?")) {
+                    return;
+                }
+
+                setSyncActionText("Requesting deletion of all stored races...", false);
+
+                try {
+                    const response = await fetch(deleteAllStoredRacesUrl, { method: "POST" });
+                    const payload = await response.json().catch(function () {
+                        return {};
+                    });
+                    if (!response.ok) {
+                        throw new Error(payload.error || "Delete-all request failed.");
+                    }
+
+                    applyLiveState(payload.live_state);
+                    setSyncActionText("Delete-all request queued.", false);
+                } catch (error) {
+                    setSyncActionText(error.message || "Delete-all request failed.", true);
                 }
             });
 
@@ -1528,6 +1588,23 @@ def _live_state_payload(state):
         if state.last_lap_elapsed_seconds is not None
         else "None"
     )
+    sync_progress_fraction = (
+        min(max(state.sync_bytes_received / state.sync_total_bytes, 0.0), 1.0)
+        if state.sync_total_bytes > 0
+        else 0.0
+    )
+    sync_progress_active = state.sync_in_progress and state.sync_current_race_id is not None
+    sync_current_race_text = (
+        f"{state.sync_current_race_id} ({state.sync_current_race_index}/{state.sync_total_races})"
+        if state.sync_current_race_id
+        else "None"
+    )
+    sync_progress_meta_text = (
+        f"{_format_byte_count(state.sync_bytes_received)} of {_format_byte_count(state.sync_total_bytes)} transferred. "
+        f"ETA {_format_eta(state.sync_eta_seconds)}."
+        if sync_progress_active and state.sync_total_bytes > 0
+        else "Waiting for the next stored-race operation."
+    )
 
     return {
         "status": state.status,
@@ -1559,6 +1636,10 @@ def _live_state_payload(state):
         "last_raw_gpstime_line": state.last_raw_gpstime_line,
         "sync_status_text": state.sync_status_text,
         "sync_in_progress": state.sync_in_progress,
+        "sync_progress_active": sync_progress_active,
+        "sync_progress_fraction": round(sync_progress_fraction, 4),
+        "sync_current_race_text": sync_current_race_text,
+        "sync_progress_meta_text": sync_progress_meta_text,
     }
 
 
@@ -1602,7 +1683,41 @@ def _normalize_stored_race_id(value):
 
 
 def _stored_race_operation_pending(state):
-    return state.sync_in_progress or state.sync_requested or state.delete_requested_race_id is not None
+    return (
+        state.sync_in_progress
+        or state.sync_requested
+        or state.delete_requested_race_id is not None
+        or state.delete_all_requested
+    )
+
+
+def _format_byte_count(byte_count):
+    if not byte_count:
+        return "0 B"
+
+    value = float(byte_count)
+    units = ["B", "KB", "MB", "GB"]
+    unit_index = 0
+    while value >= 1024.0 and unit_index < len(units) - 1:
+        value /= 1024.0
+        unit_index += 1
+    return f"{value:.1f} {units[unit_index]}" if unit_index else f"{int(value)} {units[unit_index]}"
+
+
+def _format_eta(seconds):
+    if seconds is None:
+        return "Estimating..."
+
+    remaining_seconds = max(int(round(seconds)), 0)
+    if remaining_seconds < 60:
+        return f"{remaining_seconds}s"
+
+    minutes, seconds = divmod(remaining_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds:02d}s"
+
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
 
 
 def _prepare_race_table(rows, fieldnames):
@@ -1793,7 +1908,7 @@ def create_app(state):
             return jsonify({"error": "The Arduino is not connected."}), 400
 
         if _stored_race_operation_pending(state):
-            return jsonify({"error": "A stored-race sync is already running."}), 409
+            return jsonify({"error": "A stored-race operation is already running."}), 409
 
         if state.session_requested or state.session_active:
             return jsonify({"error": "Stop the current race before syncing stored races."}), 409
@@ -1822,6 +1937,23 @@ def create_app(state):
 
         state.delete_requested_race_id = race_id
         state.sync_status_text = f"Delete requested for {race_id}. Waiting for the serial worker..."
+        response = jsonify(_dashboard_update_payload(state))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.post("/api/delete-all-stored-races")
+    def delete_all_stored_races():
+        if not state.serial_connected:
+            return jsonify({"error": "The Arduino is not connected."}), 400
+
+        if _stored_race_operation_pending(state):
+            return jsonify({"error": "A stored-race operation is already running."}), 409
+
+        if state.session_requested or state.session_active:
+            return jsonify({"error": "Stop the current race before deleting stored races."}), 409
+
+        state.delete_all_requested = True
+        state.sync_status_text = "Delete-all requested. Waiting for the serial worker..."
         response = jsonify(_dashboard_update_payload(state))
         response.headers["Cache-Control"] = "no-store"
         return response

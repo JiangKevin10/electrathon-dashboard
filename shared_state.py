@@ -39,3 +39,10 @@ class SharedState:
         self.sync_in_progress = False
         self.sync_status_text = "Idle. Stored races have not been synced yet."
         self.delete_requested_race_id = None
+        self.delete_all_requested = False
+        self.sync_total_races = 0
+        self.sync_current_race_index = 0
+        self.sync_current_race_id = None
+        self.sync_bytes_received = 0
+        self.sync_total_bytes = 0
+        self.sync_eta_seconds = None

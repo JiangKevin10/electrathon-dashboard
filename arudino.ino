@@ -553,6 +553,63 @@ void deleteStoredRace(const char* raceId) {
   Serial.println(raceId);
 }
 
+int deleteAllStoredRaces() {
+  if (!sdReady) {
+    Serial.println(F("ERROR:SD_NOT_READY"));
+    return -1;
+  }
+
+  if (loggingState) {
+    Serial.println(F("ERROR:BUSY"));
+    return -1;
+  }
+
+  int deletedCount = 0;
+
+  while (true) {
+    char filenameToDelete[16] = "";
+    File root = SD.open("/");
+    if (!root) {
+      Serial.println(F("ERROR:SD_OPEN_FAILED"));
+      return -1;
+    }
+
+    while (true) {
+      File entry = root.openNextFile();
+      if (!entry) {
+        break;
+      }
+
+      const char* entryName = entry.name();
+      if (isAnyRaceFilename(entryName)) {
+        strncpy(filenameToDelete, entryName, sizeof(filenameToDelete) - 1);
+        filenameToDelete[sizeof(filenameToDelete) - 1] = '\0';
+        entry.close();
+        break;
+      }
+
+      entry.close();
+    }
+
+    root.close();
+
+    if (filenameToDelete[0] == '\0') {
+      break;
+    }
+
+    if (!SD.remove(filenameToDelete)) {
+      Serial.println(F("ERROR:DELETE_FAILED"));
+      return -1;
+    }
+
+    deletedCount++;
+  }
+
+  Serial.print(F("DELETEALL:OK:"));
+  Serial.println(deletedCount);
+  return deletedCount;
+}
+
 void processCommand(const char* command) {
   if (strcmp(command, "CMD:LIST") == 0) {
     sendRaceList();
@@ -571,6 +628,11 @@ void processCommand(const char* command) {
 
   if (strncmp(command, "CMD:DELETE:", 11) == 0) {
     deleteStoredRace(command + 11);
+    return;
+  }
+
+  if (strcmp(command, "CMD:DELETE_ALL") == 0) {
+    deleteAllStoredRaces();
     return;
   }
 

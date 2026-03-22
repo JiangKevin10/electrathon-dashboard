@@ -11,8 +11,9 @@ RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
 SYNC_LIST_TIMEOUT_SECONDS = 4.0
-SYNC_FILE_TIMEOUT_SECONDS = 10.0
+SYNC_FILE_TIMEOUT_SECONDS = 30.0
 SYNC_ACK_TIMEOUT_SECONDS = 4.0
+DELETE_ALL_TIMEOUT_SECONDS = 15.0
 
 
 def _append_live_route_point(state):
@@ -130,6 +131,56 @@ def _current_start_zone_config(state):
     }
 
 
+def _reset_sync_progress(state):
+    state.sync_total_races = 0
+    state.sync_current_race_index = 0
+    state.sync_current_race_id = None
+    state.sync_bytes_received = 0
+    state.sync_total_bytes = 0
+    state.sync_eta_seconds = None
+
+
+def _begin_race_sync_progress(state, race_id, race_index, total_races, total_bytes):
+    state.sync_total_races = total_races
+    state.sync_current_race_index = race_index
+    state.sync_current_race_id = race_id
+    state.sync_bytes_received = 0
+    state.sync_total_bytes = max(int(total_bytes or 0), 0)
+    state.sync_eta_seconds = None
+
+
+def _update_sync_progress(state, bytes_received, total_bytes, started_monotonic):
+    state.sync_bytes_received = max(int(bytes_received or 0), 0)
+    if total_bytes is not None:
+        state.sync_total_bytes = max(int(total_bytes), 0)
+
+    if started_monotonic is None or state.sync_bytes_received <= 0:
+        state.sync_eta_seconds = None
+        return
+
+    elapsed_seconds = max(time.monotonic() - started_monotonic, 0.001)
+    if state.sync_total_bytes <= 0:
+        state.sync_eta_seconds = None
+        return
+
+    remaining_bytes = max(state.sync_total_bytes - state.sync_bytes_received, 0)
+    transfer_rate = state.sync_bytes_received / elapsed_seconds
+    state.sync_eta_seconds = (remaining_bytes / transfer_rate) if transfer_rate > 0 else None
+
+
+def _format_race_preview(race_items, *, with_details=False):
+    if not race_items:
+        return None
+
+    preview_limit = 3
+    preview_items = race_items[:preview_limit]
+    separator = "; " if with_details else ", "
+    preview_text = separator.join(preview_items)
+    if len(race_items) > preview_limit:
+        preview_text += f"{separator}and {len(race_items) - preview_limit} more"
+    return preview_text
+
+
 def _request_stored_races(ser, state):
     ser.reset_input_buffer()
     _send_command(ser, "CMD:LIST")
@@ -150,38 +201,73 @@ def _request_stored_races(ser, state):
 
         if line.startswith("LIST:ITEM:"):
             payload = line.split(":", 2)[2]
-            race_id = payload.split(",", 1)[0].strip()
+            payload_parts = payload.split(",", 1)
+            race_id = payload_parts[0].strip()
+            size_bytes = None
+            if len(payload_parts) > 1:
+                try:
+                    size_bytes = int(payload_parts[1].strip())
+                except ValueError:
+                    size_bytes = None
             if race_id:
-                races.append(race_id)
+                races.append(
+                    {
+                        "race_id": race_id,
+                        "size_bytes": size_bytes,
+                    }
+                )
             continue
 
         if line.startswith("ERROR:"):
             raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino list command failed.")
 
 
-def _receive_race_file(ser, state, race_id):
+def _receive_race_file(ser, state, race_id, expected_size_bytes=None):
     ser.reset_input_buffer()
     _send_command(ser, f"CMD:SEND:{race_id}")
     raw_lines = []
     file_started = False
+    transfer_started_monotonic = None
+    total_bytes = max(int(expected_size_bytes or 0), 0)
+    bytes_received = 0
 
     while True:
         line = _read_protocol_line(ser, state, SYNC_FILE_TIMEOUT_SECONDS)
 
         if line.startswith("FILE:BEGIN:"):
             payload = line.split(":", 2)[2]
-            if not payload.startswith(race_id):
+            payload_parts = payload.split(",", 1)
+            file_race_id = payload_parts[0].strip()
+            if file_race_id != race_id:
                 raise RuntimeError(f"Arduino started sending the wrong race: {payload}")
+            if len(payload_parts) > 1:
+                try:
+                    total_bytes = int(payload_parts[1].strip())
+                except ValueError:
+                    total_bytes = max(int(expected_size_bytes or 0), 0)
             file_started = True
+            transfer_started_monotonic = time.monotonic()
+            _update_sync_progress(state, 0, total_bytes, transfer_started_monotonic)
             continue
 
         if line.startswith("FILE:DATA:"):
-            raw_lines.append(line.split(":", 2)[2])
+            raw_line = line.split(":", 2)[2]
+            raw_lines.append(raw_line)
+            bytes_received += len(raw_line.encode("utf-8")) + 2
+            if total_bytes > 0:
+                bytes_received = min(bytes_received, total_bytes)
+            _update_sync_progress(state, bytes_received, total_bytes, transfer_started_monotonic)
             continue
 
         if line == f"FILE:END:{race_id}":
             if not file_started:
                 raise RuntimeError(f"Arduino ended race {race_id} before it started sending data.")
+            _update_sync_progress(
+                state,
+                total_bytes if total_bytes > 0 else bytes_received,
+                total_bytes,
+                transfer_started_monotonic,
+            )
             return raw_lines
 
         if line.startswith("ERROR:"):
@@ -214,6 +300,22 @@ def _delete_race_on_arduino(ser, state, race_id):
             raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to delete {race_id}.")
 
 
+def _delete_all_races_on_arduino(ser, state):
+    ser.reset_input_buffer()
+    _send_command(ser, "CMD:DELETE_ALL")
+
+    while True:
+        line = _read_protocol_line(ser, state, DELETE_ALL_TIMEOUT_SECONDS)
+        if line.startswith("DELETEALL:OK:"):
+            try:
+                return int(line.split(":", 2)[2].strip())
+            except ValueError:
+                return 0
+
+        if line.startswith("ERROR:"):
+            raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino failed to delete all stored races.")
+
+
 def _sync_stored_races(ser, state):
     state.sync_requested = False
 
@@ -222,8 +324,9 @@ def _sync_stored_races(ser, state):
         return
 
     state.sync_in_progress = True
-    imported_count = 0
-    existing_count = 0
+    _reset_sync_progress(state)
+    imported_races = []
+    existing_races = []
     failed_races = []
 
     try:
@@ -234,10 +337,24 @@ def _sync_stored_races(ser, state):
             return
 
         zone_config = _current_start_zone_config(state)
-        for index, race_id in enumerate(stored_races, start=1):
+        total_races = len(stored_races)
+        for index, stored_race in enumerate(stored_races, start=1):
+            race_id = stored_race["race_id"]
+            _begin_race_sync_progress(
+                state,
+                race_id,
+                index,
+                total_races,
+                stored_race.get("size_bytes") or 0,
+            )
             state.sync_status_text = f"Syncing {race_id} ({index}/{len(stored_races)})..."
             try:
-                raw_lines = _receive_race_file(ser, state, race_id)
+                raw_lines = _receive_race_file(
+                    ser,
+                    state,
+                    race_id,
+                    expected_size_bytes=stored_race.get("size_bytes"),
+                )
                 import_summary = archive_and_import_raw_race(
                     race_id,
                     raw_lines,
@@ -248,26 +365,33 @@ def _sync_stored_races(ser, state):
                 _acknowledge_race(ser, state, race_id)
 
                 if import_summary["import_status"] == "imported":
-                    imported_count += 1
+                    imported_races.append(race_id)
                     state.last_session_filename = str(import_summary["final_path"])
                     state.last_session_name = import_summary["final_path"].name
                 else:
-                    existing_count += 1
+                    existing_races.append(race_id)
             except Exception as exc:
                 failed_races.append(f"{race_id} ({exc})")
 
-        status_parts = [
-            f"Sync complete. Imported {imported_count} race(s).",
-            f"{existing_count} already existed on the Pi.",
-        ]
+        _reset_sync_progress(state)
+        status_parts = [f"Sync complete. Imported {len(imported_races)} race(s)."]
+        imported_preview = _format_race_preview(imported_races)
+        if imported_preview:
+            status_parts.append(f"Imported IDs: {imported_preview}.")
+
+        status_parts.append(f"{len(existing_races)} already existed on the Pi.")
+        existing_preview = _format_race_preview(existing_races)
+        if existing_preview:
+            status_parts.append(f"Existing IDs: {existing_preview}.")
+
         if failed_races:
-            preview = "; ".join(failed_races[:2])
-            if len(failed_races) > 2:
-                preview += f"; and {len(failed_races) - 2} more"
-            status_parts.append(f"Failed {len(failed_races)} race(s): {preview}.")
+            status_parts.append(
+                f"Failed {len(failed_races)} race(s): {_format_race_preview(failed_races, with_details=True)}."
+            )
 
         state.sync_status_text = " ".join(status_parts)
     except Exception as exc:
+        _reset_sync_progress(state)
         state.sync_status_text = f"Sync failed: {exc}"
     finally:
         state.sync_in_progress = False
@@ -293,6 +417,26 @@ def _delete_stored_race(ser, state):
         state.sync_status_text = f"Deleted stored race {race_id} from the Arduino."
     except Exception as exc:
         state.sync_status_text = f"Delete failed for {race_id}: {exc}"
+    finally:
+        state.sync_in_progress = False
+
+
+def _delete_all_stored_races(ser, state):
+    state.delete_all_requested = False
+
+    if state.session_requested or state.session_active:
+        state.sync_status_text = "Delete all was skipped because a race is still running."
+        return
+
+    state.sync_in_progress = True
+    _reset_sync_progress(state)
+
+    try:
+        state.sync_status_text = "Deleting all stored races from the Arduino..."
+        deleted_count = _delete_all_races_on_arduino(ser, state)
+        state.sync_status_text = f"Deleted {deleted_count} stored race(s) from the Arduino."
+    except Exception as exc:
+        state.sync_status_text = f"Delete all failed: {exc}"
     finally:
         state.sync_in_progress = False
 
@@ -376,6 +520,14 @@ def run_serial_worker(state):
                 rpm_samples.clear()
                 rpm_samples.append((now, state.count))
 
+            if state.delete_all_requested and not state.sync_in_progress:
+                _delete_all_stored_races(ser, state)
+                now = time.monotonic()
+                last_rpm_time = now
+                last_log_time = now
+                rpm_samples.clear()
+                rpm_samples.append((now, state.count))
+
             if state.sync_requested and not state.sync_in_progress:
                 _sync_stored_races(ser, state)
                 now = time.monotonic()
@@ -394,6 +546,7 @@ def run_serial_worker(state):
         state.serial_connected = False
         state.sync_in_progress = False
         state.delete_requested_race_id = None
+        state.delete_all_requested = False
         state.session_requested = False
         state.gps_latitude = None
         state.gps_longitude = None
@@ -405,6 +558,7 @@ def run_serial_worker(state):
         state.last_raw_gpstime_line = "Waiting for GPS time data"
         state.live_route_points = []
         state.current_race_id = None
+        _reset_sync_progress(state)
         reset_lap_tracking(state)
         stop_session_log(state)
         ser.close()
