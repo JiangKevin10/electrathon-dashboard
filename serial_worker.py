@@ -207,6 +207,35 @@ def _format_race_preview(race_items, *, with_details=False):
     return preview_text
 
 
+def _format_failed_races(pass_failures):
+    return [f"{item['race_id']} ({item['error']})" for item in pass_failures]
+
+
+def _build_sync_status_text(imported_races, existing_races, failed_races, warning_text=None):
+    has_warning = bool(warning_text)
+    status_prefix = "Sync complete." if not failed_races and not has_warning else "Sync partial."
+    status_parts = [f"{status_prefix} Imported {len(imported_races)} race(s)."]
+
+    imported_preview = _format_race_preview(imported_races)
+    if imported_preview:
+        status_parts.append(f"Imported IDs: {imported_preview}.")
+
+    status_parts.append(f"{len(existing_races)} already existed on the Pi.")
+    existing_preview = _format_race_preview(existing_races)
+    if existing_preview:
+        status_parts.append(f"Existing IDs: {existing_preview}.")
+
+    if failed_races:
+        status_parts.append(
+            f"Failed {len(failed_races)} race(s): {_format_race_preview(failed_races, with_details=True)}."
+        )
+
+    if warning_text:
+        status_parts.append(f"Warning: {warning_text}.")
+
+    return " ".join(status_parts)
+
+
 def _request_stored_races(ser, state):
     def run():
         ser.reset_input_buffer()
@@ -452,6 +481,7 @@ def _sync_stored_races(ser, state):
                         {
                             "race_id": race_id,
                             "error": str(exc),
+                            "stored_race": stored_race,
                         }
                     )
 
@@ -460,38 +490,34 @@ def _sync_stored_races(ser, state):
                 break
 
             if sync_pass_index >= SYNC_PASS_ATTEMPTS:
-                failed_races = [f"{item['race_id']} ({item['error']})" for item in pass_failures]
+                failed_races = _format_failed_races(pass_failures)
                 break
 
             failed_ids = {item["race_id"] for item in pass_failures}
+            failed_races = _format_failed_races(pass_failures)
             time.sleep(PROTOCOL_RETRY_DELAY_SECONDS)
-            listed_again = _request_stored_races(ser, state)
-            remaining_races = [race for race in listed_again if race["race_id"] in failed_ids]
+            try:
+                listed_again = _request_stored_races(ser, state)
+                remaining_races = [race for race in listed_again if race["race_id"] in failed_ids]
+            except Exception:
+                remaining_races = [item["stored_race"] for item in pass_failures]
             if not remaining_races:
                 failed_races = []
                 break
 
         _reset_sync_progress(state)
-        status_prefix = "Sync complete." if not failed_races else "Sync partial."
-        status_parts = [f"{status_prefix} Imported {len(imported_races)} race(s)."]
-        imported_preview = _format_race_preview(imported_races)
-        if imported_preview:
-            status_parts.append(f"Imported IDs: {imported_preview}.")
-
-        status_parts.append(f"{len(existing_races)} already existed on the Pi.")
-        existing_preview = _format_race_preview(existing_races)
-        if existing_preview:
-            status_parts.append(f"Existing IDs: {existing_preview}.")
-
-        if failed_races:
-            status_parts.append(
-                f"Failed {len(failed_races)} race(s): {_format_race_preview(failed_races, with_details=True)}."
-            )
-
-        state.sync_status_text = " ".join(status_parts)
+        state.sync_status_text = _build_sync_status_text(imported_races, existing_races, failed_races)
     except Exception as exc:
         _reset_sync_progress(state)
-        state.sync_status_text = f"Sync failed: {exc}"
+        if imported_races or existing_races or failed_races:
+            state.sync_status_text = _build_sync_status_text(
+                imported_races,
+                existing_races,
+                failed_races,
+                warning_text=f"Sync stopped early: {exc}",
+            )
+        else:
+            state.sync_status_text = f"Sync failed: {exc}"
     finally:
         state.sync_in_progress = False
 
