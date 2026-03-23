@@ -16,6 +16,7 @@ SYNC_ACK_TIMEOUT_SECONDS = 4.0
 DELETE_ALL_TIMEOUT_SECONDS = 60.0
 PROTOCOL_RETRY_ATTEMPTS = 3
 PROTOCOL_RETRY_DELAY_SECONDS = 0.35
+SYNC_PASS_ATTEMPTS = 3
 
 
 def _append_live_route_point(state):
@@ -400,44 +401,79 @@ def _sync_stored_races(ser, state):
             return
 
         zone_config = _current_start_zone_config(state)
-        total_races = len(stored_races)
-        for index, stored_race in enumerate(stored_races, start=1):
-            race_id = stored_race["race_id"]
-            _begin_race_sync_progress(
-                state,
-                race_id,
-                index,
-                total_races,
-                stored_race.get("size_bytes") or 0,
-            )
-            state.sync_status_text = f"Syncing {race_id} ({index}/{len(stored_races)})..."
-            try:
-                raw_lines = _receive_race_file(
-                    ser,
+        remaining_races = stored_races
+        for sync_pass_index in range(1, SYNC_PASS_ATTEMPTS + 1):
+            if not remaining_races:
+                break
+
+            pass_failures = []
+            total_races = len(remaining_races)
+            for index, stored_race in enumerate(remaining_races, start=1):
+                race_id = stored_race["race_id"]
+                _begin_race_sync_progress(
                     state,
                     race_id,
-                    expected_size_bytes=stored_race.get("size_bytes"),
+                    index,
+                    total_races,
+                    stored_race.get("size_bytes") or 0,
                 )
-                import_summary = archive_and_import_raw_race(
-                    race_id,
-                    raw_lines,
-                    start_zone=zone_config,
-                    radius_meters=state.start_zone_radius_meters,
-                    minimum_lap_seconds=state.minimum_lap_seconds,
-                )
-                _acknowledge_race(ser, state, race_id)
-
-                if import_summary["import_status"] == "imported":
-                    imported_races.append(race_id)
-                    state.last_session_filename = str(import_summary["final_path"])
-                    state.last_session_name = import_summary["final_path"].name
+                if sync_pass_index == 1:
+                    state.sync_status_text = f"Syncing {race_id} ({index}/{total_races})..."
                 else:
-                    existing_races.append(race_id)
-            except Exception as exc:
-                failed_races.append(f"{race_id} ({exc})")
+                    state.sync_status_text = (
+                        f"Retrying {race_id} ({index}/{total_races}, pass {sync_pass_index}/{SYNC_PASS_ATTEMPTS})..."
+                    )
+                try:
+                    raw_lines = _receive_race_file(
+                        ser,
+                        state,
+                        race_id,
+                        expected_size_bytes=stored_race.get("size_bytes"),
+                    )
+                    import_summary = archive_and_import_raw_race(
+                        race_id,
+                        raw_lines,
+                        start_zone=zone_config,
+                        radius_meters=state.start_zone_radius_meters,
+                        minimum_lap_seconds=state.minimum_lap_seconds,
+                    )
+                    _acknowledge_race(ser, state, race_id)
+
+                    if import_summary["import_status"] == "imported":
+                        if race_id not in imported_races:
+                            imported_races.append(race_id)
+                        state.last_session_filename = str(import_summary["final_path"])
+                        state.last_session_name = import_summary["final_path"].name
+                    else:
+                        if race_id not in existing_races:
+                            existing_races.append(race_id)
+                except Exception as exc:
+                    pass_failures.append(
+                        {
+                            "race_id": race_id,
+                            "error": str(exc),
+                        }
+                    )
+
+            if not pass_failures:
+                failed_races = []
+                break
+
+            if sync_pass_index >= SYNC_PASS_ATTEMPTS:
+                failed_races = [f"{item['race_id']} ({item['error']})" for item in pass_failures]
+                break
+
+            failed_ids = {item["race_id"] for item in pass_failures}
+            time.sleep(PROTOCOL_RETRY_DELAY_SECONDS)
+            listed_again = _request_stored_races(ser, state)
+            remaining_races = [race for race in listed_again if race["race_id"] in failed_ids]
+            if not remaining_races:
+                failed_races = []
+                break
 
         _reset_sync_progress(state)
-        status_parts = [f"Sync complete. Imported {len(imported_races)} race(s)."]
+        status_prefix = "Sync complete." if not failed_races else "Sync partial."
+        status_parts = [f"{status_prefix} Imported {len(imported_races)} race(s)."]
         imported_preview = _format_race_preview(imported_races)
         if imported_preview:
             status_parts.append(f"Imported IDs: {imported_preview}.")
