@@ -47,8 +47,18 @@ unsigned long readHallCount() {
   return snapshot;
 }
 
+void resetHallCount() {
+  noInterrupts();
+  count = 0;
+  interrupts();
+}
+
 bool isDigitChar(char value) {
   return value >= '0' && value <= '9';
+}
+
+bool isPrintableCommandChar(char value) {
+  return value >= 32 && value <= 126;
 }
 
 bool isRaceFilename(const char* filename, char prefix) {
@@ -307,8 +317,9 @@ bool startRaceLogging() {
   raceFile.println("elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time");
   raceFile.flush();
 
+  resetHallCount();
   raceStartMillis = millis();
-  raceStartCount = readHallCount();
+  raceStartCount = 0;
   lastRawLogTime = 0;
   loggingState = true;
   digitalWrite(ledPin, HIGH);
@@ -332,6 +343,8 @@ void stopRaceLogging() {
 
   loggingState = false;
   digitalWrite(ledPin, LOW);
+  resetHallCount();
+  raceStartCount = 0;
   Serial.println(F("RACEFILE:"));
 }
 
@@ -529,6 +542,17 @@ void acknowledgeRace(const char* raceId) {
   syncedFilename[sizeof(syncedFilename) - 1] = '\0';
   syncedFilename[0] = 'S';
 
+  if (!SD.exists(raceId)) {
+    if (SD.exists(syncedFilename)) {
+      Serial.print(F("ACK:OK:"));
+      Serial.println(raceId);
+      return;
+    }
+
+    Serial.println(F("ERROR:RACE_NOT_FOUND"));
+    return;
+  }
+
   if (!copyFile(raceId, syncedFilename)) {
     Serial.println(F("ERROR:SYNC_MARK_FAILED"));
     return;
@@ -561,7 +585,8 @@ void deleteStoredRace(const char* raceId) {
   }
 
   if (!SD.exists(raceId)) {
-    Serial.println(F("ERROR:RACE_NOT_FOUND"));
+    Serial.print(F("DELETE:OK:"));
+    Serial.println(raceId);
     return;
   }
 
@@ -650,7 +675,27 @@ void trimCommand(char* command) {
   }
 }
 
+void alignCommandPrefix(char* command) {
+  char* cmdStart = strstr(command, "CMD:");
+  char* ackStart = strstr(command, "ACK:");
+  char* prefixStart = nullptr;
+
+  if (cmdStart && ackStart) {
+    prefixStart = (cmdStart < ackStart) ? cmdStart : ackStart;
+  } else if (cmdStart) {
+    prefixStart = cmdStart;
+  } else if (ackStart) {
+    prefixStart = ackStart;
+  }
+
+  if (prefixStart && prefixStart != command) {
+    memmove(command, prefixStart, strlen(prefixStart) + 1);
+  }
+}
+
 void processCommand(char* command) {
+  trimCommand(command);
+  alignCommandPrefix(command);
   trimCommand(command);
 
   if (strcmp(command, "CMD:LIST") == 0) {
@@ -686,6 +731,11 @@ void handleSerialCommands() {
   while (Serial.available() > 0) {
     const char value = static_cast<char>(Serial.read());
     if (value == '\r') {
+      continue;
+    }
+
+    if (!isPrintableCommandChar(value) && value != '\n') {
+      commandLength = 0;
       continue;
     }
 

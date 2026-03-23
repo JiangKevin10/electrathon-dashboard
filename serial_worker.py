@@ -11,9 +11,11 @@ RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
 SYNC_LIST_TIMEOUT_SECONDS = 4.0
-SYNC_FILE_TIMEOUT_SECONDS = 30.0
+SYNC_FILE_TIMEOUT_SECONDS = 60.0
 SYNC_ACK_TIMEOUT_SECONDS = 4.0
 DELETE_ALL_TIMEOUT_SECONDS = 60.0
+PROTOCOL_RETRY_ATTEMPTS = 3
+PROTOCOL_RETRY_DELAY_SECONDS = 0.35
 
 
 def _append_live_route_point(state):
@@ -102,6 +104,29 @@ def _send_command(ser, command_text):
     ser.flush()
 
 
+def _is_retryable_protocol_error(exc):
+    if isinstance(exc, TimeoutError):
+        return True
+
+    message = str(exc or "")
+    return "UNKNOWN_COMMAND" in message or "Timed out waiting" in message
+
+
+def _run_protocol_action(action):
+    last_error = None
+
+    for attempt in range(1, PROTOCOL_RETRY_ATTEMPTS + 1):
+        try:
+            return action()
+        except Exception as exc:
+            last_error = exc
+            if attempt >= PROTOCOL_RETRY_ATTEMPTS or not _is_retryable_protocol_error(exc):
+                raise
+            time.sleep(PROTOCOL_RETRY_DELAY_SECONDS)
+
+    raise last_error
+
+
 def _read_protocol_line(ser, state, timeout_seconds):
     deadline = time.monotonic() + timeout_seconds
 
@@ -182,161 +207,176 @@ def _format_race_preview(race_items, *, with_details=False):
 
 
 def _request_stored_races(ser, state):
-    ser.reset_input_buffer()
-    _send_command(ser, "CMD:LIST")
-    races = []
-    list_started = False
+    def run():
+        ser.reset_input_buffer()
+        _send_command(ser, "CMD:LIST")
+        races = []
+        list_started = False
 
-    while True:
-        line = _read_protocol_line(ser, state, SYNC_LIST_TIMEOUT_SECONDS)
+        while True:
+            line = _read_protocol_line(ser, state, SYNC_LIST_TIMEOUT_SECONDS)
 
-        if line == "LIST:BEGIN":
-            list_started = True
-            continue
+            if line == "LIST:BEGIN":
+                list_started = True
+                continue
 
-        if line == "LIST:END":
-            if not list_started:
-                raise RuntimeError("Arduino ended the race list before starting it.")
-            return races
+            if line == "LIST:END":
+                if not list_started:
+                    raise RuntimeError("Arduino ended the race list before starting it.")
+                return races
 
-        if line.startswith("LIST:ITEM:"):
-            payload = line.split(":", 2)[2]
-            payload_parts = payload.split(",", 1)
-            race_id = payload_parts[0].strip()
-            size_bytes = None
-            if len(payload_parts) > 1:
-                try:
-                    size_bytes = int(payload_parts[1].strip())
-                except ValueError:
-                    size_bytes = None
-            if race_id:
-                races.append(
-                    {
-                        "race_id": race_id,
-                        "size_bytes": size_bytes,
-                    }
-                )
-            continue
+            if line.startswith("LIST:ITEM:"):
+                payload = line.split(":", 2)[2]
+                payload_parts = payload.split(",", 1)
+                race_id = payload_parts[0].strip()
+                size_bytes = None
+                if len(payload_parts) > 1:
+                    try:
+                        size_bytes = int(payload_parts[1].strip())
+                    except ValueError:
+                        size_bytes = None
+                if race_id:
+                    races.append(
+                        {
+                            "race_id": race_id,
+                            "size_bytes": size_bytes,
+                        }
+                    )
+                continue
 
-        if line.startswith("ERROR:"):
-            raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino list command failed.")
+            if line.startswith("ERROR:"):
+                raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino list command failed.")
+
+    return _run_protocol_action(run)
 
 
 def _receive_race_file(ser, state, race_id, expected_size_bytes=None):
-    ser.reset_input_buffer()
-    _send_command(ser, f"CMD:SEND:{race_id}")
-    raw_lines = []
-    file_started = False
-    transfer_started_monotonic = None
-    total_bytes = max(int(expected_size_bytes or 0), 0)
-    bytes_received = 0
+    def run():
+        ser.reset_input_buffer()
+        _send_command(ser, f"CMD:SEND:{race_id}")
+        raw_lines = []
+        file_started = False
+        transfer_started_monotonic = None
+        total_bytes = max(int(expected_size_bytes or 0), 0)
+        bytes_received = 0
 
-    while True:
-        line = _read_protocol_line(ser, state, SYNC_FILE_TIMEOUT_SECONDS)
+        while True:
+            line = _read_protocol_line(ser, state, SYNC_FILE_TIMEOUT_SECONDS)
 
-        if line.startswith("FILE:BEGIN:"):
-            payload = line.split(":", 2)[2]
-            payload_parts = payload.split(",", 1)
-            file_race_id = payload_parts[0].strip()
-            if file_race_id != race_id:
-                raise RuntimeError(f"Arduino started sending the wrong race: {payload}")
-            if len(payload_parts) > 1:
-                try:
-                    total_bytes = int(payload_parts[1].strip())
-                except ValueError:
-                    total_bytes = max(int(expected_size_bytes or 0), 0)
-            file_started = True
-            transfer_started_monotonic = time.monotonic()
-            _update_sync_progress(state, 0, total_bytes, transfer_started_monotonic)
-            continue
+            if line.startswith("FILE:BEGIN:"):
+                payload = line.split(":", 2)[2]
+                payload_parts = payload.split(",", 1)
+                file_race_id = payload_parts[0].strip()
+                if file_race_id != race_id:
+                    raise RuntimeError(f"Arduino started sending the wrong race: {payload}")
+                if len(payload_parts) > 1:
+                    try:
+                        total_bytes = int(payload_parts[1].strip())
+                    except ValueError:
+                        total_bytes = max(int(expected_size_bytes or 0), 0)
+                file_started = True
+                transfer_started_monotonic = time.monotonic()
+                _update_sync_progress(state, 0, total_bytes, transfer_started_monotonic)
+                continue
 
-        if line.startswith("FILE:DATA:"):
-            raw_line = line.split(":", 2)[2]
-            raw_lines.append(raw_line)
-            bytes_received += len(raw_line.encode("utf-8")) + 2
-            if total_bytes > 0:
-                bytes_received = min(bytes_received, total_bytes)
-            _update_sync_progress(state, bytes_received, total_bytes, transfer_started_monotonic)
-            continue
+            if line.startswith("FILE:DATA:"):
+                raw_line = line.split(":", 2)[2]
+                raw_lines.append(raw_line)
+                bytes_received += len(raw_line.encode("utf-8")) + 2
+                if total_bytes > 0:
+                    bytes_received = min(bytes_received, total_bytes)
+                _update_sync_progress(state, bytes_received, total_bytes, transfer_started_monotonic)
+                continue
 
-        if line == f"FILE:END:{race_id}":
-            if not file_started:
-                raise RuntimeError(f"Arduino ended race {race_id} before it started sending data.")
-            _update_sync_progress(
-                state,
-                total_bytes if total_bytes > 0 else bytes_received,
-                total_bytes,
-                transfer_started_monotonic,
-            )
-            return raw_lines
+            if line == f"FILE:END:{race_id}":
+                if not file_started:
+                    raise RuntimeError(f"Arduino ended race {race_id} before it started sending data.")
+                _update_sync_progress(
+                    state,
+                    total_bytes if total_bytes > 0 else bytes_received,
+                    total_bytes,
+                    transfer_started_monotonic,
+                )
+                return raw_lines
 
-        if line.startswith("ERROR:"):
-            raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino could not send {race_id}.")
+            if line.startswith("ERROR:"):
+                raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino could not send {race_id}.")
+
+    return _run_protocol_action(run)
 
 
 def _acknowledge_race(ser, state, race_id):
-    ser.reset_input_buffer()
-    _send_command(ser, f"ACK:{race_id}")
+    def run():
+        ser.reset_input_buffer()
+        _send_command(ser, f"ACK:{race_id}")
 
-    while True:
-        line = _read_protocol_line(ser, state, SYNC_ACK_TIMEOUT_SECONDS)
-        if line == f"ACK:OK:{race_id}":
-            return
+        while True:
+            line = _read_protocol_line(ser, state, SYNC_ACK_TIMEOUT_SECONDS)
+            if line == f"ACK:OK:{race_id}":
+                return
 
-        if line.startswith("ERROR:"):
-            raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to ACK {race_id}.")
+            if line.startswith("ERROR:"):
+                raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to ACK {race_id}.")
+
+    return _run_protocol_action(run)
 
 
 def _delete_race_on_arduino(ser, state, race_id):
-    ser.reset_input_buffer()
-    _send_command(ser, f"CMD:DELETE:{race_id}")
+    def run():
+        ser.reset_input_buffer()
+        _send_command(ser, f"CMD:DELETE:{race_id}")
 
-    while True:
-        line = _read_protocol_line(ser, state, SYNC_ACK_TIMEOUT_SECONDS)
-        if line == f"DELETE:OK:{race_id}":
-            return
+        while True:
+            line = _read_protocol_line(ser, state, SYNC_ACK_TIMEOUT_SECONDS)
+            if line == f"DELETE:OK:{race_id}":
+                return
 
-        if line.startswith("ERROR:"):
-            raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to delete {race_id}.")
+            if line.startswith("ERROR:"):
+                raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to delete {race_id}.")
+
+    return _run_protocol_action(run)
 
 
 def _delete_all_races_on_arduino(ser, state):
-    ser.reset_input_buffer()
-    _send_command(ser, "CMD:DELETE_ALL")
-    delete_started = False
+    def run():
+        ser.reset_input_buffer()
+        _send_command(ser, "CMD:DELETE_ALL")
+        delete_started = False
 
-    while True:
-        line = _read_protocol_line(ser, state, DELETE_ALL_TIMEOUT_SECONDS)
-        if line == "DELETEALL:BEGIN":
-            delete_started = True
-            state.sync_status_text = "Deleting all stored races from the Arduino..."
-            continue
+        while True:
+            line = _read_protocol_line(ser, state, DELETE_ALL_TIMEOUT_SECONDS)
+            if line == "DELETEALL:BEGIN":
+                delete_started = True
+                state.sync_status_text = "Deleting all stored races from the Arduino..."
+                continue
 
-        if line.startswith("DELETEALL:PROGRESS:"):
-            delete_started = True
-            try:
-                deleted_count = int(line.split(":", 2)[2].strip())
-            except ValueError:
-                deleted_count = None
+            if line.startswith("DELETEALL:PROGRESS:"):
+                delete_started = True
+                try:
+                    deleted_count = int(line.split(":", 2)[2].strip())
+                except ValueError:
+                    deleted_count = None
 
-            if deleted_count is not None:
-                state.sync_status_text = (
-                    f"Deleting all stored races from the Arduino... "
-                    f"{deleted_count} deleted so far."
-                )
-            continue
+                if deleted_count is not None:
+                    state.sync_status_text = (
+                        f"Deleting all stored races from the Arduino... "
+                        f"{deleted_count} deleted so far."
+                    )
+                continue
 
-        if line.startswith("DELETEALL:OK:"):
-            try:
-                return int(line.split(":", 2)[2].strip())
-            except ValueError:
-                return 0
+            if line.startswith("DELETEALL:OK:"):
+                try:
+                    return int(line.split(":", 2)[2].strip())
+                except ValueError:
+                    return 0
 
-        if line.startswith("ERROR:"):
-            raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino failed to delete all stored races.")
+            if line.startswith("ERROR:"):
+                raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino failed to delete all stored races.")
 
-        if delete_started:
-            continue
+            if delete_started:
+                continue
+
+    return _run_protocol_action(run)
 
 
 def _sync_stored_races(ser, state):
