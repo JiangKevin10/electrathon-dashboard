@@ -1,3 +1,4 @@
+from config import WHEEL_DIAMETER_METERS
 from lap_tracker import DEFAULT_MINIMUM_LAP_SECONDS, DEFAULT_START_ZONE_RADIUS_METERS
 
 
@@ -11,8 +12,12 @@ class SharedState:
         self.gps_satellites = 0
         self.gps_utc_date = None
         self.gps_utc_time = None
+        self.imu_heading_deg = None
+        self.imu_yaw_rate_dps = None
+        self.imu_ok = False
         self.last_raw_gps_line = "Waiting for GPS serial data"
         self.last_raw_gpstime_line = "Waiting for GPS time data"
+        self.last_raw_imu_line = "Waiting for IMU serial data"
         self.session_requested = False
         self.session_active = False
         self.status = "Starting..."
@@ -26,10 +31,12 @@ class SharedState:
         self.session_started_monotonic = None
         self.session_elapsed_seconds = 0.0
         self.live_route_points = []
+        self.live_samples = []
         self.start_zone_latitude = None
         self.start_zone_longitude = None
         self.start_zone_radius_meters = DEFAULT_START_ZONE_RADIUS_METERS
         self.minimum_lap_seconds = DEFAULT_MINIMUM_LAP_SECONDS
+        self.wheel_diameter_meters = max(float(WHEEL_DIAMETER_METERS), 0.0)
         self.start_zone_inside = False
         self.start_zone_departed = False
         self.start_zone_anchor_monotonic = None

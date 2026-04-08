@@ -1,3 +1,4 @@
+#include <Wire.h>
 #include <SPI.h>
 #include <SD.h>
 #include <SoftwareSerial.h>
@@ -7,15 +8,26 @@
 const byte hallPin = 2;
 const byte buttonPin = 4;
 const byte ledPin = 7;
-const byte gpsRxPin = 8;
-const byte gpsTxPin = 9;
+const byte gpsRxPin = 8; // GPS RX -> Arduino pin 8
+const byte gpsTxPin = 9; // GPS TX -> Arduino pin 9 (optional for most modules)
 const byte chipSelect = 10;
 
 const unsigned long debounceDelay = 50;
 const unsigned long dashboardSendInterval = 100;
 const unsigned long gpsNoFixReportInterval = 2000;
 const unsigned long rawLogWriteInterval = 500;
+const unsigned long imuSendInterval = 250;
 const byte syncedRaceRetentionCount = 5;
+const byte imuAddress = 0x68;
+const byte imuPowerManagementRegister = 0x6B;
+const byte imuConfigRegister = 0x1A;
+const byte imuGyroConfigRegister = 0x1B;
+const byte imuWhoAmIRegister = 0x75;
+const byte imuGyroZHighRegister = 0x47;
+const byte imuExpectedWhoAmI = 0x68;
+const float gyroZScaleDpsPerLsb = 65.5f; // +/- 500 dps
+const int imuCalibrationSamples = 300;
+const int imuCalibrationDelayMs = 5;
 
 SoftwareSerial gpsSerial(gpsRxPin, gpsTxPin);
 TinyGPSPlus gps;
@@ -35,10 +47,17 @@ unsigned long lastRawLogTime = 0;
 unsigned long raceStartMillis = 0;
 unsigned long raceStartCount = 0;
 unsigned long lastBackgroundTelemetryTime = 0;
+unsigned long lastImuSendTime = 0;
 
 char currentRaceFilename[12] = "";
 char commandBuffer[32] = "";
 byte commandLength = 0;
+
+bool imuReady = false;
+float imuHeadingDeg = 0.0f;
+float imuYawRateDps = 0.0f;
+float imuGyroZBias = 0.0f;
+unsigned long lastImuMicros = 0;
 
 unsigned long readHallCount() {
   noInterrupts();
@@ -254,6 +273,134 @@ void formatGpsTime(char* buffer, size_t size) {
   snprintf(buffer, size, "%02d:%02d:%02d", gps.time.hour(), gps.time.minute(), gps.time.second());
 }
 
+bool writeImuRegister(byte registerAddress, byte value) {
+  Wire.beginTransmission(imuAddress);
+  Wire.write(registerAddress);
+  Wire.write(value);
+  return Wire.endTransmission() == 0;
+}
+
+bool readImuRegisters(byte registerAddress, byte* buffer, byte length) {
+  Wire.beginTransmission(imuAddress);
+  Wire.write(registerAddress);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+
+  const byte bytesRead = Wire.requestFrom(imuAddress, length);
+  if (bytesRead != length) {
+    return false;
+  }
+
+  for (byte index = 0; index < length; index++) {
+    buffer[index] = Wire.read();
+  }
+  return true;
+}
+
+bool readImuGyroZRaw(int16_t* rawGyroZ) {
+  byte buffer[2];
+  if (!readImuRegisters(imuGyroZHighRegister, buffer, sizeof(buffer))) {
+    return false;
+  }
+
+  *rawGyroZ = static_cast<int16_t>((static_cast<int16_t>(buffer[0]) << 8) | buffer[1]);
+  return true;
+}
+
+void resetImuTracking() {
+  imuHeadingDeg = 0.0f;
+  imuYawRateDps = 0.0f;
+  lastImuMicros = micros();
+}
+
+bool initializeImu() {
+  byte whoAmI = 0;
+  if (!readImuRegisters(imuWhoAmIRegister, &whoAmI, 1)) {
+    return false;
+  }
+
+  if (whoAmI != imuExpectedWhoAmI) {
+    return false;
+  }
+
+  if (!writeImuRegister(imuPowerManagementRegister, 0x00)) {
+    return false;
+  }
+  delay(100);
+
+  if (!writeImuRegister(imuConfigRegister, 0x03)) {
+    return false;
+  }
+
+  if (!writeImuRegister(imuGyroConfigRegister, 0x08)) {
+    return false;
+  }
+
+  long gyroZSum = 0;
+  for (int sampleIndex = 0; sampleIndex < imuCalibrationSamples; sampleIndex++) {
+    int16_t rawGyroZ = 0;
+    if (!readImuGyroZRaw(&rawGyroZ)) {
+      return false;
+    }
+    gyroZSum += rawGyroZ;
+    delay(imuCalibrationDelayMs);
+  }
+
+  imuGyroZBias = static_cast<float>(gyroZSum) / imuCalibrationSamples;
+  resetImuTracking();
+  return true;
+}
+
+void serviceImu() {
+  if (!imuReady) {
+    return;
+  }
+
+  int16_t rawGyroZ = 0;
+  if (!readImuGyroZRaw(&rawGyroZ)) {
+    imuReady = false;
+    imuYawRateDps = 0.0f;
+    return;
+  }
+
+  const unsigned long nowMicros = micros();
+  if (lastImuMicros == 0) {
+    lastImuMicros = nowMicros;
+    return;
+  }
+
+  const float deltaSeconds = static_cast<float>(nowMicros - lastImuMicros) / 1000000.0f;
+  lastImuMicros = nowMicros;
+  imuYawRateDps = (static_cast<float>(rawGyroZ) - imuGyroZBias) / gyroZScaleDpsPerLsb;
+
+  if (imuYawRateDps > -0.35f && imuYawRateDps < 0.35f) {
+    imuYawRateDps = 0.0f;
+  }
+
+  imuHeadingDeg += imuYawRateDps * deltaSeconds;
+  while (imuHeadingDeg >= 360.0f) {
+    imuHeadingDeg -= 360.0f;
+  }
+  while (imuHeadingDeg < 0.0f) {
+    imuHeadingDeg += 360.0f;
+  }
+}
+
+void sendImuState() {
+  if (!imuReady) {
+    Serial.println(F("IMU:NOIMU"));
+    return;
+  }
+
+  Serial.print(F("IMU:"));
+  Serial.print(imuHeadingDeg, 2);
+  Serial.write(',');
+  Serial.print(imuYawRateDps, 2);
+  Serial.write(',');
+  Serial.println(1);
+}
+
 void writeRaceSample(bool forceWrite) {
   if (!loggingState || !raceFile) {
     return;
@@ -292,7 +439,17 @@ void writeRaceSample(bool forceWrite) {
   raceFile.print(",");
   raceFile.print(gpsDateBuffer);
   raceFile.print(",");
-  raceFile.println(gpsTimeBuffer);
+  raceFile.print(gpsTimeBuffer);
+  raceFile.print(",");
+  if (imuReady) {
+    raceFile.print(imuHeadingDeg, 2);
+  }
+  raceFile.print(",");
+  if (imuReady) {
+    raceFile.print(imuYawRateDps, 2);
+  }
+  raceFile.print(",");
+  raceFile.println(imuReady ? 1 : 0);
   raceFile.flush();
 
   lastRawLogTime = now;
@@ -314,10 +471,13 @@ bool startRaceLogging() {
     return false;
   }
 
-  raceFile.println("elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time");
+  raceFile.println(
+    "elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time,imu_heading_deg,imu_yaw_rate_dps,imu_ok"
+  );
   raceFile.flush();
 
   resetHallCount();
+  resetImuTracking();
   raceStartMillis = millis();
   raceStartCount = 0;
   lastRawLogTime = 0;
@@ -409,6 +569,15 @@ void sendGpsUpdates(unsigned long now) {
   }
 }
 
+void sendImuUpdates(unsigned long now) {
+  if (now - lastImuSendTime < imuSendInterval) {
+    return;
+  }
+
+  sendImuState();
+  lastImuSendTime = now;
+}
+
 void serviceGpsInput() {
   while (gpsSerial.available() > 0) {
     gps.encode(gpsSerial.read());
@@ -421,8 +590,10 @@ void serviceBackgroundTelemetry() {
     return;
   }
 
+  serviceImu();
   sendDashboardState(now);
   sendGpsUpdates(now);
+  sendImuUpdates(now);
   lastBackgroundTelemetryTime = now;
 }
 
@@ -490,7 +661,7 @@ void sendRaceFile(const char* raceId) {
   Serial.write(',');
   Serial.println(file.size());
 
-  char lineBuffer[96];
+  char lineBuffer[192];
   byte lineLength = 0;
   while (file.available()) {
     serviceGpsInput();
@@ -763,6 +934,7 @@ void hallISR() {
 void setup() {
   Serial.begin(115200);
   gpsSerial.begin(9600);
+  Wire.begin();
 
   pinMode(hallPin, INPUT_PULLUP);
   pinMode(buttonPin, INPUT_PULLUP);
@@ -780,9 +952,17 @@ void setup() {
     sdReady = false;
     Serial.println(F("SD:INIT_FAILED"));
   }
+
+  imuReady = initializeImu();
+  if (imuReady) {
+    Serial.println(F("IMU:READY"));
+  } else {
+    Serial.println(F("IMU:NOIMU"));
+  }
 }
 
 void loop() {
+  serviceImu();
   serviceGpsInput();
 
   handleSerialCommands();
@@ -795,4 +975,5 @@ void loop() {
   const unsigned long now = millis();
   sendDashboardState(now);
   sendGpsUpdates(now);
+  sendImuUpdates(now);
 }

@@ -3,29 +3,22 @@ from collections import deque
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-from config import LOG_FOLDER, MAGNETS_PER_REV, RAW_LOG_FOLDER
+from config import (
+    INITIAL_HEADING_DISTANCE_METERS,
+    LOG_FOLDER,
+    MAGNETS_PER_REV,
+    RAW_LOG_FOLDER,
+    ROUTE_BLEND_WEIGHT,
+    WHEEL_DIAMETER_METERS,
+)
 from lap_tracker import (
     DEFAULT_MINIMUM_LAP_SECONDS,
     DEFAULT_START_ZONE_RADIUS_METERS,
     configure_start_zone,
     update_lap_tracking,
 )
+from prediction_tracker import RACE_LOG_HEADER, build_log_rows
 
-IMPORTED_RACE_HEADER = [
-    "timestamp",
-    "elapsed_seconds",
-    "count",
-    "rpm",
-    "lap_count",
-    "race_id",
-    "source",
-    "latitude",
-    "longitude",
-    "gps_fix",
-    "gps_satellites",
-    "gps_utc_date",
-    "gps_utc_time",
-]
 RPM_MEASUREMENT_WINDOW_SECONDS = 2.0
 
 
@@ -35,6 +28,7 @@ def archive_and_import_raw_race(
     start_zone=None,
     radius_meters=DEFAULT_START_ZONE_RADIUS_METERS,
     minimum_lap_seconds=DEFAULT_MINIMUM_LAP_SECONDS,
+    wheel_diameter_meters=WHEEL_DIAMETER_METERS,
 ):
     raw_rows = _parse_raw_lines(raw_lines)
     if not raw_rows:
@@ -53,6 +47,7 @@ def archive_and_import_raw_race(
         start_zone=start_zone,
         radius_meters=radius_meters,
         minimum_lap_seconds=minimum_lap_seconds,
+        wheel_diameter_meters=wheel_diameter_meters,
     )
     return {
         "raw_path": raw_path,
@@ -85,6 +80,7 @@ def import_raw_race(
     start_zone=None,
     radius_meters=DEFAULT_START_ZONE_RADIUS_METERS,
     minimum_lap_seconds=DEFAULT_MINIMUM_LAP_SECONDS,
+    wheel_diameter_meters=WHEEL_DIAMETER_METERS,
 ):
     if raw_rows is None:
         with raw_path.open("r", newline="", encoding="utf-8") as file:
@@ -110,6 +106,7 @@ def import_raw_race(
         radius_meters=radius_meters,
         minimum_lap_seconds=minimum_lap_seconds,
         race_start_timestamp=race_start_timestamp,
+        wheel_diameter_meters=wheel_diameter_meters,
     )
     if not final_rows:
         raise ValueError(f"Raw race {race_id} did not contain any valid samples.")
@@ -118,7 +115,7 @@ def import_raw_race(
     final_path = _build_final_race_path(race_id, race_start_timestamp)
     with final_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
-        writer.writerow(IMPORTED_RACE_HEADER)
+        writer.writerow(RACE_LOG_HEADER)
         writer.writerows(final_rows)
 
     return final_path, "imported"
@@ -142,12 +139,13 @@ def _build_imported_rows(
     radius_meters,
     minimum_lap_seconds,
     race_start_timestamp,
+    wheel_diameter_meters,
 ):
     zone = _resolve_start_zone(raw_rows, start_zone, radius_meters, minimum_lap_seconds)
     first_valid_point = _find_first_valid_point(raw_rows)
     lap_state = _build_lap_state(zone, first_valid_point)
     rpm_samples = deque()
-    final_rows = []
+    preliminary_rows = []
 
     for raw_row in raw_rows:
         elapsed_ms = _parse_float(raw_row.get("elapsed_ms"))
@@ -188,24 +186,36 @@ def _build_imported_rows(
             lap_count = lap_state.lap_count
 
         timestamp = race_start_timestamp + timedelta(seconds=elapsed_seconds)
-        final_rows.append(
-            [
-                timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-                f"{elapsed_seconds:.2f}",
-                count,
-                round(rpm, 2),
-                lap_count,
-                race_id,
-                "arduino_sd",
-                f"{latitude:.6f}" if latitude is not None else "",
-                f"{longitude:.6f}" if longitude is not None else "",
-                1 if gps_has_fix else 0,
-                gps_satellites,
-                gps_utc_date,
-                gps_utc_time,
-            ]
+        preliminary_rows.append(
+            {
+                "timestamp": timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+                "elapsed_seconds": f"{elapsed_seconds:.2f}",
+                "count": count,
+                "rpm": round(rpm, 2),
+                "lap_count": lap_count,
+                "race_id": race_id,
+                "source": "arduino_sd",
+                "latitude": f"{latitude:.6f}" if latitude is not None else "",
+                "longitude": f"{longitude:.6f}" if longitude is not None else "",
+                "gps_fix": 1 if gps_has_fix else 0,
+                "gps_satellites": gps_satellites,
+                "gps_utc_date": gps_utc_date,
+                "gps_utc_time": gps_utc_time,
+                "wheel_diameter_meters": (
+                    f"{float(wheel_diameter_meters):.4f}" if float(wheel_diameter_meters) > 0 else ""
+                ),
+                "imu_heading_deg": raw_row.get("imu_heading_deg", ""),
+                "imu_yaw_rate_dps": raw_row.get("imu_yaw_rate_dps", ""),
+                "imu_ok": 1 if _parse_bool(raw_row.get("imu_ok")) else 0,
+            }
         )
 
+    _, final_rows = build_log_rows(
+        preliminary_rows,
+        fallback_wheel_diameter_meters=wheel_diameter_meters,
+        blend_weight=ROUTE_BLEND_WEIGHT,
+        initial_heading_distance_meters=INITIAL_HEADING_DISTANCE_METERS,
+    )
     return final_rows
 
 

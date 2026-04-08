@@ -1,6 +1,7 @@
 import csv
 from datetime import datetime
 from config import LOG_FOLDER
+from prediction_tracker import RACE_LOG_HEADER
 
 csv_file = None
 csv_writer = None
@@ -19,23 +20,7 @@ def start_session_log(state, started_monotonic):
 
     csv_file = open(filename, "w", newline="", encoding="utf-8")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(
-        [
-            "timestamp",
-            "elapsed_seconds",
-            "count",
-            "rpm",
-            "lap_count",
-            "race_id",
-            "source",
-            "latitude",
-            "longitude",
-            "gps_fix",
-            "gps_satellites",
-            "gps_utc_date",
-            "gps_utc_time",
-        ]
-    )
+    csv_writer.writerow(RACE_LOG_HEADER)
 
     state.session_active = True
     state.session_started_at = started_at
@@ -44,41 +29,18 @@ def start_session_log(state, started_monotonic):
     state.current_session_filename = str(filename)
     state.current_session_name = filename.name
     state.live_route_points = []
-    if state.gps_has_fix and state.gps_latitude is not None and state.gps_longitude is not None:
-        state.live_route_points.append(
-            {
-                "latitude": round(state.gps_latitude, 6),
-                "longitude": round(state.gps_longitude, 6),
-            }
-        )
+    state.live_samples = []
 
     print(f"Race session started -> {filename}")
 
 
-def write_session_row(state):
+def write_session_row(row_values):
     global csv_file, csv_writer
 
-    if not csv_writer or not state.session_active:
+    if not csv_writer:
         return
 
-    timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    csv_writer.writerow(
-        [
-            timestamp_str,
-            f"{state.session_elapsed_seconds:.2f}",
-            state.count,
-            round(state.rpm, 2),
-            state.lap_count,
-            state.current_race_id or "",
-            "live_serial",
-            f"{state.gps_latitude:.6f}" if state.gps_latitude is not None else "",
-            f"{state.gps_longitude:.6f}" if state.gps_longitude is not None else "",
-            1 if state.gps_has_fix else 0,
-            state.gps_satellites,
-            state.gps_utc_date or "",
-            state.gps_utc_time or "",
-        ]
-    )
+    csv_writer.writerow(row_values)
     csv_file.flush()
 
 

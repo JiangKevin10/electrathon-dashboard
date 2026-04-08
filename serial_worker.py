@@ -1,10 +1,18 @@
 from collections import deque
+from datetime import datetime
 
 import serial
 import time
-from config import PORT, BAUD, MAGNETS_PER_REV
+from config import (
+    PORT,
+    BAUD,
+    MAGNETS_PER_REV,
+    ROUTE_BLEND_WEIGHT,
+    INITIAL_HEADING_DISTANCE_METERS,
+)
 from csv_logger import start_session_log, write_session_row, stop_session_log
 from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
+from prediction_tracker import build_log_rows
 from race_importer import archive_and_import_raw_race
 
 RPM_UPDATE_INTERVAL = 0.25
@@ -34,6 +42,32 @@ def _append_live_route_point(state):
         return
 
     state.live_route_points.append(point)
+
+
+def _build_live_sample_row(state):
+    return {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "elapsed_seconds": f"{state.session_elapsed_seconds:.2f}",
+        "count": state.count,
+        "rpm": round(state.rpm, 2),
+        "lap_count": state.lap_count,
+        "race_id": state.current_race_id or "",
+        "source": "live_serial",
+        "latitude": f"{state.gps_latitude:.6f}" if state.gps_latitude is not None else "",
+        "longitude": f"{state.gps_longitude:.6f}" if state.gps_longitude is not None else "",
+        "gps_fix": 1 if state.gps_has_fix else 0,
+        "gps_satellites": state.gps_satellites,
+        "gps_utc_date": state.gps_utc_date or "",
+        "gps_utc_time": state.gps_utc_time or "",
+        "wheel_diameter_meters": (
+            f"{state.wheel_diameter_meters:.4f}" if state.wheel_diameter_meters > 0 else ""
+        ),
+        "imu_heading_deg": f"{state.imu_heading_deg:.2f}" if state.imu_heading_deg is not None else "",
+        "imu_yaw_rate_dps": (
+            f"{state.imu_yaw_rate_dps:.2f}" if state.imu_yaw_rate_dps is not None else ""
+        ),
+        "imu_ok": 1 if state.imu_ok else 0,
+    }
 
 
 def _handle_live_serial_line(state, line, now):
@@ -95,6 +129,26 @@ def _handle_live_serial_line(state, line, now):
         if len(time_parts) >= 2:
             state.gps_utc_date = time_parts[0]
             state.gps_utc_time = time_parts[1]
+        return True
+
+    if line.startswith("IMU:"):
+        print(f"[ARDUINO] {line}")
+        state.last_raw_imu_line = line
+        imu_payload = line.split(":", 1)[1].strip()
+        if imu_payload in {"NOIMU", "DISCONNECTED"}:
+            state.imu_heading_deg = None
+            state.imu_yaw_rate_dps = None
+            state.imu_ok = False
+            return True
+
+        imu_parts = imu_payload.split(",")
+        if len(imu_parts) >= 3:
+            try:
+                state.imu_heading_deg = float(imu_parts[0])
+                state.imu_yaw_rate_dps = float(imu_parts[1])
+                state.imu_ok = int(imu_parts[2]) == 1
+            except ValueError:
+                pass
         return True
 
     return False
@@ -465,6 +519,7 @@ def _sync_stored_races(ser, state):
                         start_zone=zone_config,
                         radius_meters=state.start_zone_radius_meters,
                         minimum_lap_seconds=state.minimum_lap_seconds,
+                        wheel_diameter_meters=state.wheel_diameter_meters,
                     )
                     _acknowledge_race(ser, state, race_id)
 
@@ -633,7 +688,16 @@ def run_serial_worker(state):
 
             if now - last_log_time >= LOG_WRITE_INTERVAL:
                 if state.session_active:
-                    write_session_row(state)
+                    sample_row = _build_live_sample_row(state)
+                    state.live_samples.append(sample_row)
+                    route_data, log_rows = build_log_rows(
+                        state.live_samples,
+                        fallback_wheel_diameter_meters=state.wheel_diameter_meters,
+                        blend_weight=ROUTE_BLEND_WEIGHT,
+                        initial_heading_distance_meters=INITIAL_HEADING_DISTANCE_METERS,
+                    )
+                    write_session_row(log_rows[-1])
+                    state.live_route_points = route_data["modes"]["gps"]["route_points"]
 
                 last_log_time = now
 
@@ -679,9 +743,14 @@ def run_serial_worker(state):
         state.gps_satellites = 0
         state.gps_utc_date = None
         state.gps_utc_time = None
+        state.imu_heading_deg = None
+        state.imu_yaw_rate_dps = None
+        state.imu_ok = False
         state.last_raw_gps_line = "Waiting for GPS serial data"
         state.last_raw_gpstime_line = "Waiting for GPS time data"
+        state.last_raw_imu_line = "Waiting for IMU serial data"
         state.live_route_points = []
+        state.live_samples = []
         state.current_race_id = None
         _reset_sync_progress(state)
         reset_lap_tracking(state)

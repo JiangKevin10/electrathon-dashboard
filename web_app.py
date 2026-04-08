@@ -13,8 +13,9 @@ from flask import (
     url_for,
 )
 
-from config import LOG_FOLDER
+from config import INITIAL_HEADING_DISTANCE_METERS, LOG_FOLDER, ROUTE_BLEND_WEIGHT
 from lap_tracker import clear_start_zone, configure_start_zone, has_start_zone
+from prediction_tracker import build_route_modes
 
 CLEAR_HISTORY_PASSWORD = "lymanpassword"
 HIDDEN_RACE_COLUMNS = {"pps_locked", "pps_pulse_count", "pps_age_ms", "race_id", "source"}
@@ -331,7 +332,10 @@ HOME_TEMPLATE = """
                         <h2 style="margin: 0 0 6px;">Live Route Map</h2>
                         <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
                     </div>
-                    <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                    <div class="action-row" style="margin: 0;">
+                        <select id="route-mode-select"></select>
+                        <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                    </div>
                 </div>
                 <div id="route-map"></div>
             </section>
@@ -372,9 +376,29 @@ HOME_TEMPLATE = """
                 </article>
 
                 <article class="card">
-                    <h3>Raw GPS Serial</h3>
+                    <h3>IMU / Replay</h3>
+                    <p class="detail-line">Wheel Diameter: <b id="wheel-diameter-text">{{ live_state.wheel_diameter_text }}</b></p>
+                    <p class="detail-line">IMU Status: <b id="imu-status-text">{{ live_state.imu_status_text }}</b></p>
+                    <p class="detail-line">IMU Heading: <b id="imu-heading-text">{{ live_state.imu_heading_text }}</b></p>
+                    <p class="detail-line">Yaw Rate: <b id="imu-yaw-rate-text">{{ live_state.imu_yaw_rate_text }}</b></p>
+                    <div class="field-grid">
+                        <div>
+                            <label for="wheel-diameter-input">Wheel Diameter (meters)</label>
+                            <input
+                                id="wheel-diameter-input"
+                                type="number"
+                                min="0"
+                                step="0.001"
+                                value="{{ live_state.wheel_diameter_value }}"
+                            >
+                        </div>
+                    </div>
+                    <div class="action-row">
+                        <button class="map-action" id="save-wheel-diameter" type="button">Save Wheel Size</button>
+                    </div>
                     <p class="detail-line">GPS: <code id="raw-gps-line">{{ live_state.last_raw_gps_line }}</code></p>
                     <p class="detail-line">GPSTIME: <code id="raw-gpstime-line">{{ live_state.last_raw_gpstime_line }}</code></p>
+                    <p class="detail-line">IMU: <code id="raw-imu-line">{{ live_state.last_raw_imu_line }}</code></p>
                 </article>
             </section>
         </main>
@@ -390,21 +414,91 @@ HOME_TEMPLATE = """
             const liveRouteUrl = {{ url_for("live_route")|tojson }};
             const setStartZoneUrl = {{ url_for("set_start_zone")|tojson }};
             const clearStartZoneUrl = {{ url_for("clear_start_zone_route")|tojson }};
+            const saveWheelDiameterUrl = {{ url_for("set_wheel_settings")|tojson }};
             const syncStoredRacesUrl = {{ url_for("sync_stored_races")|tojson }};
             const deleteStoredRaceUrl = {{ url_for("delete_stored_race")|tojson }};
             const deleteAllStoredRacesUrl = {{ url_for("delete_all_stored_races")|tojson }};
             let lastLiveState = {{ live_state|tojson }};
+            let lastRouteState = {{ route_state|tojson }};
+            const routeModeSelect = document.getElementById("route-mode-select");
+            let selectedRouteMode = null;
             const routeMap = createRouteMap({
                 containerId: "route-map",
                 statusId: "route-map-status",
                 pointsLabel: "route points"
             });
 
-            let lastRouteState = {{ route_state|tojson }};
-            routeMap.render(lastRouteState, { forceFit: true });
+            function syncRouteModeOptions(routeState) {
+                const options = Array.isArray(routeState && routeState.mode_options)
+                    ? routeState.mode_options
+                    : [];
+                const previousValue = selectedRouteMode || routeModeSelect.value;
+
+                routeModeSelect.replaceChildren();
+                for (const option of options) {
+                    const element = document.createElement("option");
+                    element.value = option.key;
+                    element.textContent = option.available
+                        ? option.label
+                        : option.label + " (Unavailable)";
+                    element.disabled = !option.available;
+                    routeModeSelect.appendChild(element);
+                }
+
+                const availableValues = options.filter(function (option) {
+                    return option.available;
+                }).map(function (option) {
+                    return option.key;
+                });
+                const fallbackValue = (
+                    availableValues.includes(previousValue)
+                        ? previousValue
+                        : (
+                            routeState && availableValues.includes(routeState.default_mode)
+                                ? routeState.default_mode
+                                : (availableValues[0] || "")
+                        )
+                );
+                selectedRouteMode = fallbackValue;
+                routeModeSelect.value = fallbackValue;
+            }
+
+            function getRenderableRouteState(routeState) {
+                const selectedKey = selectedRouteMode || (routeState && routeState.default_mode) || "gps";
+                const activeMode = (
+                    routeState
+                    && routeState.modes
+                    && routeState.modes[selectedKey]
+                ) || {};
+
+                return {
+                    session_active: Boolean(routeState && routeState.session_active),
+                    gps_has_fix: Boolean(routeState && routeState.gps_has_fix),
+                    current_position: activeMode.current_position || (routeState && routeState.current_position) || null,
+                    start_zone: activeMode.start_zone || (routeState && routeState.start_zone) || null,
+                    anchor_position: activeMode.anchor_position || (routeState && routeState.anchor_position) || null,
+                    route_points: Array.isArray(activeMode.route_points) ? activeMode.route_points : [],
+                    overlay_routes: Array.isArray(activeMode.overlay_routes) ? activeMode.overlay_routes : [],
+                    mode_label: activeMode.label || selectedKey,
+                    mode_available: Boolean(activeMode.available),
+                    unavailable_reason: activeMode.unavailable_reason || null
+                };
+            }
+
+            function renderRouteState(routeState, options) {
+                syncRouteModeOptions(routeState);
+                routeMap.render(getRenderableRouteState(routeState), options);
+            }
+
+            renderRouteState(lastRouteState, { forceFit: true });
 
             document.getElementById("recenter-route").addEventListener("click", function () {
-                routeMap.recenterToRoute(lastRouteState);
+                routeMap.recenterToRoute(getRenderableRouteState(lastRouteState));
+            });
+
+            routeModeSelect.addEventListener("change", function () {
+                selectedRouteMode = routeModeSelect.value;
+                renderRouteState(lastRouteState);
             });
 
             function updateRaceLink(elementId, filename, url) {
@@ -508,8 +602,13 @@ HOME_TEMPLATE = """
                 document.getElementById("start-zone-center-text").textContent = data.start_zone_center_text;
                 document.getElementById("start-zone-radius-text").textContent = data.start_zone_radius_text;
                 document.getElementById("minimum-lap-text").textContent = data.minimum_lap_text;
+                document.getElementById("wheel-diameter-text").textContent = data.wheel_diameter_text;
+                document.getElementById("imu-status-text").textContent = data.imu_status_text;
+                document.getElementById("imu-heading-text").textContent = data.imu_heading_text;
+                document.getElementById("imu-yaw-rate-text").textContent = data.imu_yaw_rate_text;
                 document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
                 document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                document.getElementById("raw-imu-line").textContent = data.last_raw_imu_line;
                 document.getElementById("sync-status-text").textContent = data.sync_status_text;
                 updateRaceLink("current-file", data.current_session_name, data.current_session_url);
                 updateRaceLink("last-file", data.last_session_name, data.last_session_url);
@@ -519,12 +618,22 @@ HOME_TEMPLATE = """
                 if (opts.syncControls) {
                     syncNumberInput("start-zone-radius-input", data.start_zone_radius_value);
                     syncNumberInput("minimum-lap-seconds-input", data.minimum_lap_seconds_value);
+                    syncNumberInput("wheel-diameter-input", data.wheel_diameter_value);
                 }
             }
 
             function readPositiveNumber(elementId) {
                 const parsedValue = Number.parseFloat(document.getElementById(elementId).value);
                 if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+                    return null;
+                }
+
+                return parsedValue;
+            }
+
+            function readNonNegativeNumber(elementId) {
+                const parsedValue = Number.parseFloat(document.getElementById(elementId).value);
+                if (!Number.isFinite(parsedValue) || parsedValue < 0) {
                     return null;
                 }
 
@@ -575,7 +684,7 @@ HOME_TEMPLATE = """
                     }
 
                     lastRouteState = await response.json();
-                    routeMap.render(lastRouteState);
+                    renderRouteState(lastRouteState);
                 } catch (error) {
                 } finally {
                     liveRouteRequestInFlight = false;
@@ -604,10 +713,40 @@ HOME_TEMPLATE = """
 
                     applyLiveState(payload.live_state, { syncControls: true });
                     lastRouteState = payload.route_state;
-                    routeMap.render(lastRouteState, { forceFit: true });
+                    renderRouteState(lastRouteState, { forceFit: true });
                     setStartZoneActionText(successMessage, false);
                 } catch (error) {
                     setStartZoneActionText(error.message || "Request failed.", true);
+                }
+            }
+
+            async function saveWheelDiameter() {
+                const wheelDiameter = readNonNegativeNumber("wheel-diameter-input");
+                if (wheelDiameter === null) {
+                    setStartZoneActionText("Enter a wheel diameter that is zero or greater.", true);
+                    return;
+                }
+
+                try {
+                    const response = await fetch(saveWheelDiameterUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ wheel_diameter_meters: wheelDiameter })
+                    });
+                    const payload = await response.json().catch(function () {
+                        return {};
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(payload.error || "Wheel size update failed.");
+                    }
+
+                    applyLiveState(payload.live_state, { syncControls: true });
+                    lastRouteState = payload.route_state;
+                    renderRouteState(lastRouteState, { forceFit: true });
+                    setStartZoneActionText("Wheel diameter updated.", false);
+                } catch (error) {
+                    setStartZoneActionText(error.message || "Wheel size update failed.", true);
                 }
             }
 
@@ -636,6 +775,8 @@ HOME_TEMPLATE = """
                     "Start zone cleared."
                 );
             });
+
+            document.getElementById("save-wheel-diameter").addEventListener("click", saveWheelDiameter);
 
             document.getElementById("sync-stored-races").addEventListener("click", async function () {
                 setSyncActionText("Requesting stored races from the Arduino...", false);
@@ -749,27 +890,28 @@ ROUTE_MAP_SCRIPT = """
         }
 
         function buildStatusText(data, pointCount) {
+            const modeLabel = data && data.mode_label ? data.mode_label + ". " : "";
+            if (data && data.mode_available === false && data.unavailable_reason) {
+                return modeLabel + data.unavailable_reason;
+            }
+
             if (pointCount > 1) {
-                if (data && data.session_active && data.gps_has_fix) {
-                    return pointCount + " route points captured. Live route is updating.";
-                }
-
                 if (data && data.session_active) {
-                    return pointCount + " route points captured. Waiting for the next GPS fix.";
+                    return modeLabel + pointCount + " route points captured. Live route is updating.";
                 }
 
-                return pointCount + " route points captured for this saved run.";
+                return modeLabel + pointCount + " route points captured for this saved run.";
             }
 
             if (pointCount === 1) {
-                return "Only one GPS point has been captured so far.";
+                return modeLabel + "Only one route point has been captured so far.";
             }
 
             if (isValidPoint(data && data.current_position)) {
-                return "Showing the latest GPS position.";
+                return modeLabel + "Showing the latest position.";
             }
 
-            return "Waiting for GPS route data.";
+            return modeLabel + "Waiting for route data.";
         }
 
         function hasHoverDetails(point) {
@@ -779,6 +921,13 @@ ROUTE_MAP_SCRIPT = """
                     Number.isFinite(point.elapsed_seconds)
                     || Number.isFinite(point.rpm)
                     || Number.isFinite(point.count)
+                    || Number.isFinite(point.imu_heading_deg)
+                    || Number.isFinite(point.imu_yaw_rate_dps)
+                    || Number.isFinite(point.gps_speed_mps)
+                    || Number.isFinite(point.rpm_speed_mps)
+                    || Number.isFinite(point.x_m)
+                    || Number.isFinite(point.y_m)
+                    || (typeof point.est_source === "string" && point.est_source)
                     || (typeof point.timestamp === "string" && point.timestamp)
                 )
             );
@@ -809,6 +958,34 @@ ROUTE_MAP_SCRIPT = """
 
             if (Number.isFinite(point.count)) {
                 lines.push("<b>Count:</b> " + point.count);
+            }
+
+            if (Number.isFinite(point.lap_count)) {
+                lines.push("<b>Lap:</b> " + point.lap_count);
+            }
+
+            if (Number.isFinite(point.imu_heading_deg)) {
+                lines.push("<b>IMU Heading:</b> " + point.imu_heading_deg.toFixed(2) + " deg");
+            }
+
+            if (Number.isFinite(point.imu_yaw_rate_dps)) {
+                lines.push("<b>Yaw Rate:</b> " + point.imu_yaw_rate_dps.toFixed(2) + " deg/s");
+            }
+
+            if (Number.isFinite(point.gps_speed_mps)) {
+                lines.push("<b>GPS Speed:</b> " + point.gps_speed_mps.toFixed(3) + " m/s");
+            }
+
+            if (Number.isFinite(point.rpm_speed_mps)) {
+                lines.push("<b>RPM Speed:</b> " + point.rpm_speed_mps.toFixed(3) + " m/s");
+            }
+
+            if (Number.isFinite(point.x_m) && Number.isFinite(point.y_m)) {
+                lines.push("<b>Track XY:</b> " + point.x_m.toFixed(2) + ", " + point.y_m.toFixed(2) + " m");
+            }
+
+            if (typeof point.est_source === "string" && point.est_source) {
+                lines.push("<b>Estimate:</b> " + escapeHtml(point.est_source));
             }
 
             if (typeof point.timestamp === "string" && point.timestamp) {
@@ -858,6 +1035,13 @@ ROUTE_MAP_SCRIPT = """
             fillOpacity: 0.95
         });
 
+        const anchorMarker = L.circleMarker([0, 0], {
+            radius: 7,
+            color: "#6a1b9a",
+            fillColor: "#ab47bc",
+            fillOpacity: 0.95
+        });
+
         const startZoneCircle = L.circle([0, 0], {
             radius: 0,
             color: "#2e7d32",
@@ -879,6 +1063,7 @@ ROUTE_MAP_SCRIPT = """
         let hasView = false;
         let hoverPoints = [];
         let hoverEnabled = false;
+        const overlayLayers = new Map();
 
         map.on("dragstart", function () {
             followRoute = false;
@@ -956,19 +1141,80 @@ ROUTE_MAP_SCRIPT = """
         });
         routeLine.on("mouseout", hideHoverMarker);
 
-        function fitMap(latLngs, currentLatLng, startZoneLatLng, forceFit) {
+        function syncOverlayRoutes(routes) {
+            const nextKeys = new Set();
+            for (const route of Array.isArray(routes) ? routes : []) {
+                if (!route || !route.key) {
+                    continue;
+                }
+
+                nextKeys.add(route.key);
+                let layer = overlayLayers.get(route.key);
+                if (!layer) {
+                    layer = L.polyline([], {
+                        color: route.color || "#90a4ae",
+                        weight: route.weight || 4,
+                        opacity: route.opacity || 0.5,
+                        dashArray: route.dash_array || null,
+                        lineCap: "round",
+                        lineJoin: "round",
+                        interactive: false
+                    });
+                    overlayLayers.set(route.key, layer);
+                }
+
+                layer.setStyle({
+                    color: route.color || "#90a4ae",
+                    weight: route.weight || 4,
+                    opacity: route.opacity || 0.5,
+                    dashArray: route.dash_array || null
+                });
+                layer.setLatLngs(
+                    (Array.isArray(route.points) ? route.points : [])
+                        .filter(isValidPoint)
+                        .map(toLatLng)
+                );
+                if (layer.getLatLngs().length) {
+                    if (!map.hasLayer(layer)) {
+                        layer.addTo(map);
+                    }
+                } else {
+                    removeLayerIfPresent(map, layer);
+                }
+            }
+
+            for (const [key, layer] of overlayLayers.entries()) {
+                if (!nextKeys.has(key)) {
+                    removeLayerIfPresent(map, layer);
+                    overlayLayers.delete(key);
+                }
+            }
+        }
+
+        function fitMap(latLngs, overlayLatLngs, currentLatLng, startZoneLatLng, anchorLatLng, forceFit) {
             if (!(forceFit || followRoute || !hasView)) {
                 return;
             }
 
-            if (latLngs.length > 1) {
-                map.fitBounds(routeLine.getBounds(), { padding: [24, 24] });
+            const allLatLngs = latLngs.concat(overlayLatLngs || []);
+            if (currentLatLng) {
+                allLatLngs.push(currentLatLng);
+            }
+            if (startZoneLatLng) {
+                allLatLngs.push(startZoneLatLng);
+            }
+            if (anchorLatLng) {
+                allLatLngs.push(anchorLatLng);
+            }
+
+            if (allLatLngs.length > 1) {
+                map.fitBounds(allLatLngs, { padding: [24, 24] });
                 hasView = true;
                 return;
             }
 
-            if (latLngs.length === 1) {
-                map.setView(latLngs[0], 17);
+            if (allLatLngs.length === 1) {
+                map.setView(allLatLngs[0], 17);
                 hasView = true;
                 return;
             }
@@ -997,8 +1243,21 @@ ROUTE_MAP_SCRIPT = """
                 ? data.route_points.filter(isValidPoint)
                 : [];
             const latLngs = points.map(toLatLng);
+            const overlayRoutes = Array.isArray(data && data.overlay_routes)
+                ? data.overlay_routes
+                : [];
+            const overlayLatLngs = [];
+            for (const route of overlayRoutes) {
+                const routeLatLngs = (Array.isArray(route && route.points) ? route.points : [])
+                    .filter(isValidPoint)
+                    .map(toLatLng);
+                overlayLatLngs.push.apply(overlayLatLngs, routeLatLngs);
+            }
             const currentLatLng = isValidPoint(data && data.current_position)
                 ? toLatLng(data.current_position)
+                : null;
+            const anchorLatLng = isValidPoint(data && data.anchor_position)
+                ? toLatLng(data.anchor_position)
                 : null;
             const startZone = (
                 isValidPoint(data && data.start_zone)
@@ -1011,6 +1270,7 @@ ROUTE_MAP_SCRIPT = """
             hoverEnabled = Boolean(options.enablePointHover) && points.some(hasHoverDetails);
 
             routeLine.setLatLngs(latLngs);
+            syncOverlayRoutes(overlayRoutes);
 
             if (startZone) {
                 startZoneCircle.setLatLng(startZoneLatLng);
@@ -1050,11 +1310,24 @@ ROUTE_MAP_SCRIPT = """
                 removeLayerIfPresent(map, currentMarker);
             }
 
+            if (anchorLatLng) {
+                setMarker(map, anchorMarker, anchorLatLng, "Anchor");
+            } else {
+                removeLayerIfPresent(map, anchorMarker);
+            }
+
             if (!hoverEnabled) {
                 hideHoverMarker();
             }
 
-            fitMap(latLngs, currentLatLng, startZoneLatLng, Boolean(opts.forceFit));
+            fitMap(
+                latLngs,
+                overlayLatLngs,
+                currentLatLng,
+                startZoneLatLng,
+                anchorLatLng,
+                Boolean(opts.forceFit)
+            );
 
             if (statusElement) {
                 statusElement.textContent = buildStatusText(data, latLngs.length);
@@ -1400,13 +1673,16 @@ RACE_DETAIL_TEMPLATE = """
              <section class="card" style="margin-bottom: 18px;">
                  <div class="map-toolbar">
                      <div>
-                         <h2 style="margin: 0 0 6px;">Route Map</h2>
-                         <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
+                          <h2 style="margin: 0 0 6px;">Route Map</h2>
+                          <div class="map-status" id="route-map-status">Waiting for GPS route data.</div>
                      </div>
-                     <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                     <div class="action-row" style="margin: 0;">
+                         <select id="route-mode-select"></select>
+                         <button class="map-action" id="recenter-route" type="button">Recenter Route</button>
+                     </div>
                  </div>
                  <div id="route-map"></div>
-                 <p class="meta" style="margin: 12px 0 0;">Hover over the route to inspect the nearest recorded RPM and elapsed time.</p>
+                 <p class="meta" style="margin: 12px 0 0;">Hover over the active route to inspect RPM, IMU, and estimated-position details.</p>
              </section>
 
             <section class="card">
@@ -1447,24 +1723,80 @@ RACE_DETAIL_TEMPLATE = """
         ></script>
         {{ route_map_script|safe }}
         <script>
-            const routeData = {
-                session_active: false,
-                gps_has_fix: {{ (route_point_count > 0)|tojson }},
-                current_position: {{ (route_points[-1] if route_points else none)|tojson }},
-                route_points: {{ route_points|tojson }}
-            };
+            const routeData = {{ route_data|tojson }};
+            const routeModeSelect = document.getElementById("route-mode-select");
+            let selectedRouteMode = null;
 
-             const routeMap = createRouteMap({
-                 containerId: "route-map",
-                 statusId: "route-map-status",
-                 pointsLabel: "saved route points",
-                 enablePointHover: true
-             });
+            const routeMap = createRouteMap({
+                containerId: "route-map",
+                statusId: "route-map-status",
+                pointsLabel: "saved route points",
+                enablePointHover: true
+            });
 
-            routeMap.render(routeData, { forceFit: true });
+            function syncRouteModeOptions(data) {
+                const options = Array.isArray(data && data.mode_options) ? data.mode_options : [];
+                routeModeSelect.replaceChildren();
+                for (const option of options) {
+                    const element = document.createElement("option");
+                    element.value = option.key;
+                    element.textContent = option.available
+                        ? option.label
+                        : option.label + " (Unavailable)";
+                    element.disabled = !option.available;
+                    routeModeSelect.appendChild(element);
+                }
+
+                const availableOptions = options.filter(function (option) {
+                    return option.available;
+                });
+                selectedRouteMode = (
+                    availableOptions.some(function (option) { return option.key === selectedRouteMode; })
+                        ? selectedRouteMode
+                        : (
+                            availableOptions.some(function (option) { return option.key === data.default_mode; })
+                                ? data.default_mode
+                                : (availableOptions[0] ? availableOptions[0].key : "")
+                        )
+                );
+                routeModeSelect.value = selectedRouteMode;
+            }
+
+            function getRenderableRouteState(data) {
+                const activeMode = (
+                    data
+                    && data.modes
+                    && data.modes[selectedRouteMode || data.default_mode]
+                ) || {};
+
+                return {
+                    session_active: false,
+                    gps_has_fix: Boolean(data && data.gps_has_fix),
+                    current_position: activeMode.current_position || (data && data.current_position) || null,
+                    start_zone: activeMode.start_zone || null,
+                    anchor_position: activeMode.anchor_position || (data && data.anchor_position) || null,
+                    route_points: Array.isArray(activeMode.route_points) ? activeMode.route_points : [],
+                    overlay_routes: Array.isArray(activeMode.overlay_routes) ? activeMode.overlay_routes : [],
+                    mode_label: activeMode.label || "",
+                    mode_available: Boolean(activeMode.available),
+                    unavailable_reason: activeMode.unavailable_reason || null
+                };
+            }
+
+            function renderSelectedRoute(options) {
+                syncRouteModeOptions(routeData);
+                routeMap.render(getRenderableRouteState(routeData), options);
+            }
+
+            renderSelectedRoute({ forceFit: true });
 
             document.getElementById("recenter-route").addEventListener("click", function () {
-                routeMap.recenterToRoute(routeData);
+                routeMap.recenterToRoute(getRenderableRouteState(routeData));
+            });
+
+            routeModeSelect.addEventListener("change", function () {
+                selectedRouteMode = routeModeSelect.value;
+                renderSelectedRoute();
             });
         </script>
     </body>
@@ -1550,6 +1882,33 @@ def _start_zone_status_text(state):
     return "Armed. Re-enter the circle to count a lap."
 
 
+def _route_payload_from_rows(
+    rows,
+    *,
+    session_active,
+    start_zone,
+    current_position,
+    fallback_wheel_diameter_meters,
+):
+    route_payload = build_route_modes(
+        rows,
+        session_active=session_active,
+        start_zone=start_zone,
+        current_position=current_position,
+        fallback_wheel_diameter_meters=fallback_wheel_diameter_meters,
+        blend_weight=ROUTE_BLEND_WEIGHT,
+        initial_heading_distance_meters=INITIAL_HEADING_DISTANCE_METERS,
+    )
+    route_payload.pop("samples", None)
+    route_payload["session_active"] = session_active
+    route_payload["gps_has_fix"] = bool(
+        route_payload.get("modes", {}).get("gps", {}).get("route_points")
+    ) or current_position is not None
+    route_payload["current_position"] = current_position
+    route_payload["start_zone"] = start_zone
+    return route_payload
+
+
 def _live_state_payload(state):
     started_text = (
         state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -1583,6 +1942,14 @@ def _live_state_payload(state):
     )
     start_zone_radius_text = f"{state.start_zone_radius_meters:.1f} m"
     minimum_lap_text = f"{state.minimum_lap_seconds:.0f} s"
+    wheel_diameter_text = (
+        f"{state.wheel_diameter_meters:.3f} m" if state.wheel_diameter_meters > 0 else "Not set"
+    )
+    imu_status_text = "READY" if state.imu_ok else "Waiting for IMU data"
+    imu_heading_text = f"{state.imu_heading_deg:.2f} deg" if state.imu_heading_deg is not None else "Unknown"
+    imu_yaw_rate_text = (
+        f"{state.imu_yaw_rate_dps:.2f} deg/s" if state.imu_yaw_rate_dps is not None else "Unknown"
+    )
     last_lap_text = (
         f"{state.last_lap_elapsed_seconds:.1f}s from start"
         if state.last_lap_elapsed_seconds is not None
@@ -1625,6 +1992,11 @@ def _live_state_payload(state):
         "gps_longitude_text": gps_longitude_text,
         "gps_maps_url": gps_maps_url,
         "gps_time_text": gps_time_text,
+        "wheel_diameter_text": wheel_diameter_text,
+        "wheel_diameter_value": round(state.wheel_diameter_meters, 4),
+        "imu_status_text": imu_status_text,
+        "imu_heading_text": imu_heading_text,
+        "imu_yaw_rate_text": imu_yaw_rate_text,
         "start_zone_active": start_zone is not None,
         "start_zone_center_text": start_zone_center_text,
         "start_zone_radius_text": start_zone_radius_text,
@@ -1634,6 +2006,7 @@ def _live_state_payload(state):
         "start_zone_status_text": _start_zone_status_text(state),
         "last_raw_gps_line": state.last_raw_gps_line,
         "last_raw_gpstime_line": state.last_raw_gpstime_line,
+        "last_raw_imu_line": state.last_raw_imu_line,
         "sync_status_text": state.sync_status_text,
         "sync_in_progress": state.sync_in_progress,
         "sync_progress_active": sync_progress_active,
@@ -1645,13 +2018,13 @@ def _live_state_payload(state):
 
 def _live_route_payload(state):
     current_position = _current_position(state)
-    return {
-        "session_active": state.session_active,
-        "gps_has_fix": current_position is not None,
-        "current_position": current_position,
-        "start_zone": _start_zone_payload(state),
-        "route_points": [dict(point) for point in state.live_route_points],
-    }
+    return _route_payload_from_rows(
+        state.live_samples,
+        session_active=state.session_active,
+        start_zone=_start_zone_payload(state),
+        current_position=current_position,
+        fallback_wheel_diameter_meters=state.wheel_diameter_meters,
+    )
 
 
 def _dashboard_update_payload(state):
@@ -1902,6 +2275,23 @@ def create_app(state):
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @app.post("/api/wheel-settings")
+    def set_wheel_settings():
+        payload = request.get_json(silent=True) or {}
+
+        try:
+            wheel_diameter_meters = float(payload.get("wheel_diameter_meters", state.wheel_diameter_meters))
+        except (TypeError, ValueError):
+            return jsonify({"error": "Wheel diameter must be a number."}), 400
+
+        if wheel_diameter_meters < 0:
+            return jsonify({"error": "Wheel diameter must be zero or greater."}), 400
+
+        state.wheel_diameter_meters = wheel_diameter_meters
+        response = jsonify(_dashboard_update_payload(state))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.post("/api/sync-stored-races")
     def sync_stored_races():
         if not state.serial_connected:
@@ -2050,7 +2440,16 @@ def create_app(state):
         final_count = 0
         duration = "0.00"
         display_rows, header_labels, race_date_text = _prepare_race_table(rows, fieldnames)
-        route_points = _extract_route_points(rows)
+        route_data = _route_payload_from_rows(
+            rows,
+            session_active=False,
+            start_zone=None,
+            current_position=None,
+            fallback_wheel_diameter_meters=0.0,
+        )
+        route_point_count = len(
+            route_data.get("modes", {}).get("gps", {}).get("route_points", [])
+        )
 
         if rows:
             duration = rows[-1].get("elapsed_seconds", "0.00")
@@ -2080,8 +2479,8 @@ def create_app(state):
             race_date_text=race_date_text,
             race_file_name=race_file.name,
             route_map_script=ROUTE_MAP_SCRIPT,
-            route_points=route_points,
-            route_point_count=len(route_points),
+            route_data=route_data,
+            route_point_count=route_point_count,
             rows=rows,
             table_column_count=max(len(fieldnames), 1),
         )
