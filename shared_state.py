@@ -17,6 +17,7 @@ class SharedState:
         self.session_active = False
         self.status = "Starting..."
         self.serial_connected = False
+        self.device_type = None
         self.current_session_filename = None
         self.current_session_name = None
         self.last_session_filename = None

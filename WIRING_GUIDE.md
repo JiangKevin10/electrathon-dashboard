@@ -14,7 +14,8 @@ Both versions expect these external parts:
 - 1 hall-effect sensor for wheel or motor pulse counting
 - 1 momentary pushbutton for start/stop
 - 1 GPS module running at `9600` baud UART
-- 1 microSD card module over SPI
+- microSD storage
+- either an onboard ESP32 microSD slot or an external SPI microSD module
 - 1 USB connection to the computer or Pi running the dashboard
 
 Important behavior from the code:
@@ -27,6 +28,42 @@ Important behavior from the code:
 ## ESP32 Wiring
 
 Source: `esp32_dashboard/esp32_dashboard.ino`
+
+The ESP32 sketch now supports two storage backends:
+
+- `STORAGE_BACKEND_SD_SPI` for an external SPI microSD adapter
+- `STORAGE_BACKEND_SD_MMC` for an onboard microSD slot
+
+To use the onboard slot, change this line near the top of `esp32_dashboard/esp32_dashboard.ino`:
+
+```cpp
+#define STORAGE_BACKEND STORAGE_BACKEND_SD_MMC
+```
+
+### ESP32 With Onboard microSD Slot
+
+If your ESP32 board already has a built-in microSD slot, you do not wire a separate SD adapter.
+
+Use:
+
+- the board's built-in card slot
+- the board's built-in SD wiring
+- the `STORAGE_BACKEND_SD_MMC` setting in the sketch
+
+What still needs to be wired externally:
+
+- hall sensor to `GPIO25`
+- start/stop button to `GPIO27` and `GND`
+- GPS to `GPIO16` and `GPIO17`
+- USB to the dashboard host
+
+Important limitation:
+
+- the exact onboard microSD wiring depends on the specific ESP32 board
+- `SD_MMC` only works if the board's slot is actually connected to the ESP32 in a way supported by that board definition
+- if your board does not expose a working onboard SD slot through `SD_MMC`, you must either adapt the sketch to that board's pinout or keep using SPI mode
+
+### ESP32 With External SPI microSD Adapter
 
 ### Pin Map
 
@@ -183,3 +220,4 @@ If you run the dashboard on Windows, you will likely need to set `ELECTRATHON_PO
 - The ESP32 sketch does not use the separate external LED that the Arduino sketch uses on `D7`.
 - The dashboard calculates RPM using `MAGNETS_PER_REV` from `config.py`. If you use more than one magnet, set that value correctly.
 - If your GPS module only needs one data wire, you can usually leave the module `RX` unconnected and still read position data.
+- When using an onboard ESP32 microSD slot, the SD wiring is internal to the board, so the external SD rows in the ESP32 tables do not apply.

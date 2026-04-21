@@ -698,6 +698,11 @@ void processCommand(char* command) {
   alignCommandPrefix(command);
   trimCommand(command);
 
+  if (strcmp(command, "CMD:IDENTIFY") == 0) {
+    Serial.println(F("DEVICE:ARDUINO"));
+    return;
+  }
+
   if (strcmp(command, "CMD:LIST") == 0) {
     sendRaceList();
     return;

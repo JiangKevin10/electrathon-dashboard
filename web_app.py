@@ -235,6 +235,7 @@ HOME_TEMPLATE = """
                 <article class="card">
                     <h2>Status</h2>
                     <p class="detail-line">Serial: <b id="status-text">{{ live_state.status }}</b></p>
+                    <p class="detail-line">Device: <b id="device-text">{{ live_state.device_text }}</b></p>
                     <p class="detail-line">Session: <b id="session-text">{{ live_state.session_text }}</b></p>
                     <p class="detail-line">
                         Current Race File:
@@ -242,7 +243,7 @@ HOME_TEMPLATE = """
                             {% if live_state.current_session_name and live_state.current_session_url %}
                                 <a href="{{ live_state.current_session_url }}">{{ live_state.current_session_name }}</a>
                             {% else %}
-                                None
+                                {{ live_state.current_session_text }}
                             {% endif %}
                         </b>
                     </p>
@@ -252,7 +253,7 @@ HOME_TEMPLATE = """
                             {% if live_state.last_session_name and live_state.last_session_url %}
                                 <a href="{{ live_state.last_session_url }}">{{ live_state.last_session_name }}</a>
                             {% else %}
-                                None
+                                {{ live_state.last_session_text }}
                             {% endif %}
                         </b>
                     </p>
@@ -321,7 +322,7 @@ HOME_TEMPLATE = """
                         <progress id="sync-progress-bar" max="1" value="{{ live_state.sync_progress_fraction }}"></progress>
                         <p class="meta" id="sync-progress-meta">{{ live_state.sync_progress_meta_text }}</p>
                     </div>
-                    <p class="meta" id="sync-action-text">Import races saved on the Arduino SD card, or delete a bad stored race by ID.</p>
+                    <p class="meta" id="sync-action-text">Import races saved on the controller, or delete a bad stored race by ID.</p>
                 </article>
             </section>
 
@@ -407,21 +408,6 @@ HOME_TEMPLATE = """
                 routeMap.recenterToRoute(lastRouteState);
             });
 
-            function updateRaceLink(elementId, filename, url) {
-                const target = document.getElementById(elementId);
-                target.replaceChildren();
-
-                if (filename && url) {
-                    const link = document.createElement("a");
-                    link.href = url;
-                    link.textContent = filename;
-                    target.appendChild(link);
-                    return;
-                }
-
-                target.textContent = "None";
-            }
-
             function updateGpsLink(url) {
                 const gpsLink = document.getElementById("gps-map-link");
                 if (url) {
@@ -454,8 +440,33 @@ HOME_TEMPLATE = """
                 target.style.color = isError ? "#8d1b1b" : "";
             }
 
+            const unavailableActionText = "Not available on this controller.";
+            const syncActionDefaultText = "Import races saved on the controller, or delete a bad stored race by ID.";
+            const startZoneActionDefaultText = "Use the current GPS fix to place the start zone.";
+
             function normalizeRaceId(value) {
                 return String(value || "").trim().toUpperCase();
+            }
+
+            function updateStartZoneControlsState(data) {
+                const available = Boolean(data.start_zone_controls_available);
+                const radiusInput = document.getElementById("start-zone-radius-input");
+                const minimumInput = document.getElementById("minimum-lap-seconds-input");
+                const setButton = document.getElementById("set-start-zone");
+                const clearButton = document.getElementById("clear-start-zone");
+                const recenterButton = document.getElementById("recenter-route");
+
+                radiusInput.disabled = !available;
+                minimumInput.disabled = !available;
+                setButton.disabled = !available;
+                clearButton.disabled = !available;
+                recenterButton.disabled = !Boolean(data.gps_available);
+
+                if (!available) {
+                    setStartZoneActionText(unavailableActionText, false);
+                } else if (document.getElementById("start-zone-action-text").textContent === unavailableActionText) {
+                    setStartZoneActionText(startZoneActionDefaultText, false);
+                }
             }
 
             function updateStoredRaceControlsState(data) {
@@ -464,17 +475,24 @@ HOME_TEMPLATE = """
                 const deleteAllButton = document.getElementById("delete-all-stored-races");
                 const deleteInput = document.getElementById("stored-race-delete-input");
                 const raceId = normalizeRaceId(deleteInput.value);
-                const busy = Boolean(data.sync_in_progress);
+                const available = Boolean(data.storage_available);
+                const busy = available && Boolean(data.sync_in_progress);
                 const sessionRunning = data.session_text === "RUNNING";
 
-                syncButton.disabled = busy || sessionRunning;
-                syncButton.textContent = busy ? "Working..." : "Sync Stored Races";
+                syncButton.disabled = !available || busy || sessionRunning;
+                syncButton.textContent = available ? (busy ? "Working..." : "Sync Stored Races") : "Not Available";
 
-                deleteInput.disabled = busy || sessionRunning;
-                deleteButton.disabled = busy || sessionRunning || !raceId;
-                deleteButton.textContent = busy ? "Working..." : "Delete Stored Race";
-                deleteAllButton.disabled = busy || sessionRunning;
-                deleteAllButton.textContent = busy ? "Working..." : "Delete All Stored Races";
+                deleteInput.disabled = !available || busy || sessionRunning;
+                deleteButton.disabled = !available || busy || sessionRunning || !raceId;
+                deleteButton.textContent = available ? (busy ? "Working..." : "Delete Stored Race") : "Not Available";
+                deleteAllButton.disabled = !available || busy || sessionRunning;
+                deleteAllButton.textContent = available ? (busy ? "Working..." : "Delete All Stored Races") : "Not Available";
+
+                if (!available) {
+                    setSyncActionText(unavailableActionText, false);
+                } else if (document.getElementById("sync-action-text").textContent === unavailableActionText) {
+                    setSyncActionText(syncActionDefaultText, false);
+                }
             }
 
             function updateSyncProgress(data) {
@@ -489,10 +507,26 @@ HOME_TEMPLATE = """
                 progressMeta.textContent = data.sync_progress_meta_text;
             }
 
+            function updateRaceLink(elementId, filename, url, fallbackText) {
+                const target = document.getElementById(elementId);
+                target.replaceChildren();
+
+                if (filename && url) {
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.textContent = filename;
+                    target.appendChild(link);
+                    return;
+                }
+
+                target.textContent = fallbackText || "None";
+            }
+
             function applyLiveState(data, options) {
                 const opts = options || {};
                 lastLiveState = data;
                 document.getElementById("status-text").textContent = data.status;
+                document.getElementById("device-text").textContent = data.device_text;
                 document.getElementById("session-text").textContent = data.session_text;
                 document.getElementById("started-text").textContent = data.started_text;
                 document.getElementById("elapsed-text").textContent = data.elapsed_text;
@@ -511,9 +545,10 @@ HOME_TEMPLATE = """
                 document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
                 document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
                 document.getElementById("sync-status-text").textContent = data.sync_status_text;
-                updateRaceLink("current-file", data.current_session_name, data.current_session_url);
-                updateRaceLink("last-file", data.last_session_name, data.last_session_url);
+                updateRaceLink("current-file", data.current_session_name, data.current_session_url, data.current_session_text);
+                updateRaceLink("last-file", data.last_session_name, data.last_session_url, data.last_session_text);
                 updateGpsLink(data.gps_maps_url);
+                updateStartZoneControlsState(data);
                 updateSyncProgress(data);
                 updateStoredRaceControlsState(data);
                 if (opts.syncControls) {
@@ -638,7 +673,7 @@ HOME_TEMPLATE = """
             });
 
             document.getElementById("sync-stored-races").addEventListener("click", async function () {
-                setSyncActionText("Requesting stored races from the Arduino...", false);
+                setSyncActionText("Requesting stored races from the controller...", false);
 
                 try {
                     const response = await fetch(syncStoredRacesUrl, { method: "POST" });
@@ -693,7 +728,7 @@ HOME_TEMPLATE = """
             });
 
             document.getElementById("delete-all-stored-races").addEventListener("click", async function () {
-                if (!window.confirm("Delete all stored races from the Arduino SD card?")) {
+                if (!window.confirm("Delete all stored races from the controller?")) {
                     return;
                 }
 
@@ -749,6 +784,10 @@ ROUTE_MAP_SCRIPT = """
         }
 
         function buildStatusText(data, pointCount) {
+            if (data && data.gps_available === false) {
+                return "Not available on this controller.";
+            }
+
             if (pointCount > 1) {
                 if (data && data.session_active && data.gps_has_fix) {
                     return pointCount + " route points captured. Live route is updating.";
@@ -1550,74 +1589,147 @@ def _start_zone_status_text(state):
     return "Armed. Re-enter the circle to count a lap."
 
 
+def _device_text(state):
+    if state.device_type == "arduino":
+        return "Arduino"
+    if state.device_type == "esp32":
+        return "ESP32"
+    return "Unknown"
+
+
+def _is_hall_only_controller(state):
+    return state.device_type == "esp32"
+
+
+def _session_available(state):
+    return not _is_hall_only_controller(state)
+
+
+def _gps_available(state):
+    return not _is_hall_only_controller(state)
+
+
+def _storage_available(state):
+    return not _is_hall_only_controller(state)
+
+
 def _live_state_payload(state):
+    session_available = _session_available(state)
+    gps_available = _gps_available(state)
+    storage_available = _storage_available(state)
+    not_available_text = "Not available"
     started_text = (
         state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
-        if state.session_started_at
-        else "None"
+        if session_available and state.session_started_at
+        else ("None" if session_available else not_available_text)
     )
-    elapsed_text = f"{state.session_elapsed_seconds:.1f}s" if state.session_active else "0.0s"
-    current_position = _current_position(state)
-    gps_latitude_text = f"{state.gps_latitude:.6f}" if state.gps_latitude is not None else "Unknown"
-    gps_longitude_text = f"{state.gps_longitude:.6f}" if state.gps_longitude is not None else "Unknown"
+    elapsed_text = (
+        f"{state.session_elapsed_seconds:.1f}s"
+        if session_available and state.session_active
+        else ("0.0s" if session_available else not_available_text)
+    )
+    current_position = _current_position(state) if gps_available else None
+    gps_latitude_text = (
+        f"{state.gps_latitude:.6f}"
+        if gps_available and state.gps_latitude is not None
+        else ("Unknown" if gps_available else not_available_text)
+    )
+    gps_longitude_text = (
+        f"{state.gps_longitude:.6f}"
+        if gps_available and state.gps_longitude is not None
+        else ("Unknown" if gps_available else not_available_text)
+    )
     gps_status_text = (
-        f"FIX ({state.gps_satellites} satellites)"
-        if current_position
-        else "Searching for fix"
+        (
+            f"FIX ({state.gps_satellites} satellites)"
+            if current_position
+            else "Searching for fix"
+        )
+        if gps_available
+        else not_available_text
     )
     gps_maps_url = (
         f"https://www.google.com/maps?q={current_position['latitude']:.6f},{current_position['longitude']:.6f}"
-        if current_position
+        if gps_available and current_position
         else None
     )
     gps_time_text = (
-        f"{state.gps_utc_date} {state.gps_utc_time} UTC"
-        if state.gps_utc_date and state.gps_utc_time
-        else "Unknown"
+        (
+            f"{state.gps_utc_date} {state.gps_utc_time} UTC"
+            if state.gps_utc_date and state.gps_utc_time
+            else "Unknown"
+        )
+        if gps_available
+        else not_available_text
     )
-    start_zone = _start_zone_payload(state)
+    start_zone = _start_zone_payload(state) if gps_available else None
     start_zone_center_text = (
         f"{start_zone['latitude']:.6f}, {start_zone['longitude']:.6f}"
-        if start_zone
-        else "None"
+        if gps_available and start_zone
+        else ("None" if gps_available else not_available_text)
     )
-    start_zone_radius_text = f"{state.start_zone_radius_meters:.1f} m"
-    minimum_lap_text = f"{state.minimum_lap_seconds:.0f} s"
+    start_zone_radius_text = (
+        f"{state.start_zone_radius_meters:.1f} m" if gps_available else not_available_text
+    )
+    minimum_lap_text = f"{state.minimum_lap_seconds:.0f} s" if gps_available else not_available_text
     last_lap_text = (
-        f"{state.last_lap_elapsed_seconds:.1f}s from start"
-        if state.last_lap_elapsed_seconds is not None
-        else "None"
+        (
+            f"{state.last_lap_elapsed_seconds:.1f}s from start"
+            if state.last_lap_elapsed_seconds is not None
+            else "None"
+        )
+        if gps_available and session_available
+        else not_available_text
     )
     sync_progress_fraction = (
         min(max(state.sync_bytes_received / state.sync_total_bytes, 0.0), 1.0)
-        if state.sync_total_bytes > 0
+        if storage_available and state.sync_total_bytes > 0
         else 0.0
     )
-    sync_progress_active = state.sync_in_progress and state.sync_current_race_id is not None
+    sync_progress_active = (
+        storage_available and state.sync_in_progress and state.sync_current_race_id is not None
+    )
     sync_current_race_text = (
         f"{state.sync_current_race_id} ({state.sync_current_race_index}/{state.sync_total_races})"
-        if state.sync_current_race_id
-        else "None"
+        if storage_available and state.sync_current_race_id
+        else ("None" if storage_available else not_available_text)
     )
     sync_progress_meta_text = (
         f"{_format_byte_count(state.sync_bytes_received)} of {_format_byte_count(state.sync_total_bytes)} transferred. "
         f"ETA {_format_eta(state.sync_eta_seconds)}."
-        if sync_progress_active and state.sync_total_bytes > 0
-        else "Waiting for the next stored-race operation."
+        if storage_available and sync_progress_active and state.sync_total_bytes > 0
+        else (
+            "Waiting for the next stored-race operation."
+            if storage_available
+            else not_available_text
+        )
     )
 
     return {
         "status": state.status,
-        "session_text": "RUNNING" if state.session_active else "IDLE",
-        "current_session_name": state.current_session_name,
-        "last_session_name": state.last_session_name,
+        "device_text": _device_text(state),
+        "session_text": (
+            "RUNNING" if session_available and state.session_active else "IDLE"
+        ) if session_available else not_available_text,
+        "session_available": session_available,
+        "gps_available": gps_available,
+        "storage_available": storage_available,
+        "start_zone_controls_available": gps_available,
+        "current_session_name": state.current_session_name if storage_available else None,
+        "current_session_text": (
+            state.current_session_name or "None"
+        ) if storage_available else not_available_text,
+        "last_session_name": state.last_session_name if storage_available else None,
+        "last_session_text": (
+            state.last_session_name or "None"
+        ) if storage_available else not_available_text,
         "started_text": started_text,
         "elapsed_text": elapsed_text,
         "rpm_text": f"{state.rpm:.2f}",
         "count_text": str(state.count),
-        "lap_count_text": str(state.lap_count),
+        "lap_count_text": str(state.lap_count) if gps_available and session_available else not_available_text,
         "last_lap_text": last_lap_text,
-        "gps_has_fix": current_position is not None,
+        "gps_has_fix": gps_available and current_position is not None,
         "gps_latitude": current_position["latitude"] if current_position else None,
         "gps_longitude": current_position["longitude"] if current_position else None,
         "gps_status_text": gps_status_text,
@@ -1631,11 +1743,11 @@ def _live_state_payload(state):
         "start_zone_radius_value": round(state.start_zone_radius_meters, 1),
         "minimum_lap_text": minimum_lap_text,
         "minimum_lap_seconds_value": round(state.minimum_lap_seconds, 1),
-        "start_zone_status_text": _start_zone_status_text(state),
-        "last_raw_gps_line": state.last_raw_gps_line,
-        "last_raw_gpstime_line": state.last_raw_gpstime_line,
-        "sync_status_text": state.sync_status_text,
-        "sync_in_progress": state.sync_in_progress,
+        "start_zone_status_text": _start_zone_status_text(state) if gps_available else not_available_text,
+        "last_raw_gps_line": state.last_raw_gps_line if gps_available else not_available_text,
+        "last_raw_gpstime_line": state.last_raw_gpstime_line if gps_available else not_available_text,
+        "sync_status_text": state.sync_status_text if storage_available else not_available_text,
+        "sync_in_progress": storage_available and state.sync_in_progress,
         "sync_progress_active": sync_progress_active,
         "sync_progress_fraction": round(sync_progress_fraction, 4),
         "sync_current_race_text": sync_current_race_text,
@@ -1644,13 +1756,15 @@ def _live_state_payload(state):
 
 
 def _live_route_payload(state):
-    current_position = _current_position(state)
+    gps_available = _gps_available(state)
+    current_position = _current_position(state) if gps_available else None
     return {
-        "session_active": state.session_active,
-        "gps_has_fix": current_position is not None,
+        "session_active": state.session_active if _session_available(state) else False,
+        "gps_available": gps_available,
+        "gps_has_fix": gps_available and current_position is not None,
         "current_position": current_position,
-        "start_zone": _start_zone_payload(state),
-        "route_points": [dict(point) for point in state.live_route_points],
+        "start_zone": _start_zone_payload(state) if gps_available else None,
+        "route_points": [dict(point) for point in state.live_route_points] if gps_available else [],
     }
 
 
@@ -1867,6 +1981,9 @@ def create_app(state):
 
     @app.post("/api/start-zone")
     def set_start_zone():
+        if not _gps_available(state):
+            return jsonify({"error": "Start-zone controls are not available on this controller."}), 400
+
         payload = request.get_json(silent=True) or {}
         current_position = _current_position(state)
         if current_position is None:
@@ -1897,6 +2014,9 @@ def create_app(state):
 
     @app.post("/api/start-zone/clear")
     def clear_start_zone_route():
+        if not _gps_available(state):
+            return jsonify({"error": "Start-zone controls are not available on this controller."}), 400
+
         clear_start_zone(state)
         response = jsonify(_dashboard_update_payload(state))
         response.headers["Cache-Control"] = "no-store"
@@ -1904,8 +2024,11 @@ def create_app(state):
 
     @app.post("/api/sync-stored-races")
     def sync_stored_races():
+        if not _storage_available(state):
+            return jsonify({"error": "Stored-race sync is not available on this controller."}), 400
+
         if not state.serial_connected:
-            return jsonify({"error": "The Arduino is not connected."}), 400
+            return jsonify({"error": "The controller is not connected."}), 400
 
         if _stored_race_operation_pending(state):
             return jsonify({"error": "A stored-race operation is already running."}), 409
@@ -1921,8 +2044,11 @@ def create_app(state):
 
     @app.post("/api/delete-stored-race")
     def delete_stored_race():
+        if not _storage_available(state):
+            return jsonify({"error": "Stored-race delete is not available on this controller."}), 400
+
         if not state.serial_connected:
-            return jsonify({"error": "The Arduino is not connected."}), 400
+            return jsonify({"error": "The controller is not connected."}), 400
 
         if _stored_race_operation_pending(state):
             return jsonify({"error": "A stored-race operation is already running."}), 409
@@ -1943,8 +2069,11 @@ def create_app(state):
 
     @app.post("/api/delete-all-stored-races")
     def delete_all_stored_races():
+        if not _storage_available(state):
+            return jsonify({"error": "Stored-race delete is not available on this controller."}), 400
+
         if not state.serial_connected:
-            return jsonify({"error": "The Arduino is not connected."}), 400
+            return jsonify({"error": "The controller is not connected."}), 400
 
         if _stored_race_operation_pending(state):
             return jsonify({"error": "A stored-race operation is already running."}), 409

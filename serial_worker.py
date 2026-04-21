@@ -10,6 +10,7 @@ from race_importer import archive_and_import_raw_race
 RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
+IDENTIFY_TIMEOUT_SECONDS = 2.0
 SYNC_LIST_TIMEOUT_SECONDS = 4.0
 SYNC_FILE_TIMEOUT_SECONDS = 60.0
 SYNC_ACK_TIMEOUT_SECONDS = 4.0
@@ -17,6 +18,43 @@ DELETE_ALL_TIMEOUT_SECONDS = 60.0
 PROTOCOL_RETRY_ATTEMPTS = 3
 PROTOCOL_RETRY_DELAY_SECONDS = 0.35
 SYNC_PASS_ATTEMPTS = 3
+
+
+def _device_name(state):
+    if state.device_type == "arduino":
+        return "Arduino"
+    if state.device_type == "esp32":
+        return "ESP32"
+    return None
+
+
+def _device_name_or(state, fallback):
+    return _device_name(state) or fallback
+
+
+def _identify_connected_device(ser, state):
+    def run():
+        ser.reset_input_buffer()
+        _send_command(ser, "CMD:IDENTIFY")
+
+        while True:
+            line = _read_protocol_line(ser, state, IDENTIFY_TIMEOUT_SECONDS)
+
+            if line.startswith("DEVICE:"):
+                payload = line.split(":", 1)[1].strip().upper()
+                if payload == "ARDUINO":
+                    return "arduino"
+                if payload == "ESP32":
+                    return "esp32"
+                raise RuntimeError(f"Unsupported device identity: {payload or 'UNKNOWN'}")
+
+            if line.startswith("ERROR:"):
+                raise RuntimeError(line.split(":", 1)[1].strip() or "Identify command failed.")
+
+    try:
+        return _run_protocol_action(run)
+    except Exception:
+        return None
 
 
 def _append_live_route_point(state):
@@ -57,7 +95,7 @@ def _handle_live_serial_line(state, line, now):
         return True
 
     if line.startswith("GPS:"):
-        print(f"[ARDUINO] {line}")
+        print(f"[{_device_name_or(state, 'SERIAL').upper()}] {line}")
         state.last_raw_gps_line = line
         gps_payload = line.split(":", 1)[1].strip()
         if gps_payload == "NOFIX":
@@ -83,7 +121,7 @@ def _handle_live_serial_line(state, line, now):
         return True
 
     if line.startswith("GPSTIME:"):
-        print(f"[ARDUINO] {line}")
+        print(f"[{_device_name_or(state, 'SERIAL').upper()}] {line}")
         state.last_raw_gpstime_line = line
         time_payload = line.split(":", 1)[1].strip()
         if time_payload == "NOFIX":
@@ -142,7 +180,7 @@ def _read_protocol_line(ser, state, timeout_seconds):
 
         return line
 
-    raise TimeoutError("Timed out waiting for the Arduino response.")
+    raise TimeoutError(f"Timed out waiting for the {_device_name_or(state, 'controller')} response.")
 
 
 def _current_start_zone_config(state):
@@ -252,7 +290,9 @@ def _request_stored_races(ser, state):
 
             if line == "LIST:END":
                 if not list_started:
-                    raise RuntimeError("Arduino ended the race list before starting it.")
+                    raise RuntimeError(
+                        f"{_device_name_or(state, 'Controller')} ended the race list before starting it."
+                    )
                 return races
 
             if line.startswith("LIST:ITEM:"):
@@ -275,7 +315,10 @@ def _request_stored_races(ser, state):
                 continue
 
             if line.startswith("ERROR:"):
-                raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino list command failed.")
+                raise RuntimeError(
+                    line.split(":", 1)[1].strip()
+                    or f"{_device_name_or(state, 'Controller')} list command failed."
+                )
 
     return _run_protocol_action(run)
 
@@ -298,7 +341,9 @@ def _receive_race_file(ser, state, race_id, expected_size_bytes=None):
                 payload_parts = payload.split(",", 1)
                 file_race_id = payload_parts[0].strip()
                 if file_race_id != race_id:
-                    raise RuntimeError(f"Arduino started sending the wrong race: {payload}")
+                    raise RuntimeError(
+                        f"{_device_name_or(state, 'Controller')} started sending the wrong race: {payload}"
+                    )
                 if len(payload_parts) > 1:
                     try:
                         total_bytes = int(payload_parts[1].strip())
@@ -320,7 +365,9 @@ def _receive_race_file(ser, state, race_id, expected_size_bytes=None):
 
             if line == f"FILE:END:{race_id}":
                 if not file_started:
-                    raise RuntimeError(f"Arduino ended race {race_id} before it started sending data.")
+                    raise RuntimeError(
+                        f"{_device_name_or(state, 'Controller')} ended race {race_id} before it started sending data."
+                    )
                 _update_sync_progress(
                     state,
                     total_bytes if total_bytes > 0 else bytes_received,
@@ -330,7 +377,10 @@ def _receive_race_file(ser, state, race_id, expected_size_bytes=None):
                 return raw_lines
 
             if line.startswith("ERROR:"):
-                raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino could not send {race_id}.")
+                raise RuntimeError(
+                    line.split(":", 1)[1].strip()
+                    or f"{_device_name_or(state, 'Controller')} could not send {race_id}."
+                )
 
     return _run_protocol_action(run)
 
@@ -346,7 +396,10 @@ def _acknowledge_race(ser, state, race_id):
                 return
 
             if line.startswith("ERROR:"):
-                raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to ACK {race_id}.")
+                raise RuntimeError(
+                    line.split(":", 1)[1].strip()
+                    or f"{_device_name_or(state, 'Controller')} failed to ACK {race_id}."
+                )
 
     return _run_protocol_action(run)
 
@@ -362,7 +415,10 @@ def _delete_race_on_arduino(ser, state, race_id):
                 return
 
             if line.startswith("ERROR:"):
-                raise RuntimeError(line.split(":", 1)[1].strip() or f"Arduino failed to delete {race_id}.")
+                raise RuntimeError(
+                    line.split(":", 1)[1].strip()
+                    or f"{_device_name_or(state, 'Controller')} failed to delete {race_id}."
+                )
 
     return _run_protocol_action(run)
 
@@ -377,7 +433,9 @@ def _delete_all_races_on_arduino(ser, state):
             line = _read_protocol_line(ser, state, DELETE_ALL_TIMEOUT_SECONDS)
             if line == "DELETEALL:BEGIN":
                 delete_started = True
-                state.sync_status_text = "Deleting all stored races from the Arduino..."
+                state.sync_status_text = (
+                    f"Deleting all stored races from the {_device_name_or(state, 'controller')}..."
+                )
                 continue
 
             if line.startswith("DELETEALL:PROGRESS:"):
@@ -389,7 +447,7 @@ def _delete_all_races_on_arduino(ser, state):
 
                 if deleted_count is not None:
                     state.sync_status_text = (
-                        f"Deleting all stored races from the Arduino... "
+                        f"Deleting all stored races from the {_device_name_or(state, 'controller')}... "
                         f"{deleted_count} deleted so far."
                     )
                 continue
@@ -401,7 +459,10 @@ def _delete_all_races_on_arduino(ser, state):
                     return 0
 
             if line.startswith("ERROR:"):
-                raise RuntimeError(line.split(":", 1)[1].strip() or "Arduino failed to delete all stored races.")
+                raise RuntimeError(
+                    line.split(":", 1)[1].strip()
+                    or f"{_device_name_or(state, 'Controller')} failed to delete all stored races."
+                )
 
             if delete_started:
                 continue
@@ -423,10 +484,14 @@ def _sync_stored_races(ser, state):
     failed_races = []
 
     try:
-        state.sync_status_text = "Checking the Arduino SD card for stored races..."
+        state.sync_status_text = (
+            f"Checking the {_device_name_or(state, 'controller')} for stored races..."
+        )
         stored_races = _request_stored_races(ser, state)
         if not stored_races:
-            state.sync_status_text = "Sync complete. No stored races were waiting on the Arduino."
+            state.sync_status_text = (
+                f"Sync complete. No stored races were waiting on the {_device_name_or(state, 'controller')}."
+            )
             return
 
         zone_config = _current_start_zone_config(state)
@@ -539,7 +604,9 @@ def _delete_stored_race(ser, state):
     try:
         state.sync_status_text = f"Deleting stored race {race_id}..."
         _delete_race_on_arduino(ser, state, race_id)
-        state.sync_status_text = f"Deleted stored race {race_id} from the Arduino."
+        state.sync_status_text = (
+            f"Deleted stored race {race_id} from the {_device_name_or(state, 'controller')}."
+        )
     except Exception as exc:
         state.sync_status_text = f"Delete failed for {race_id}: {exc}"
     finally:
@@ -557,9 +624,13 @@ def _delete_all_stored_races(ser, state):
     _reset_sync_progress(state)
 
     try:
-        state.sync_status_text = "Deleting all stored races from the Arduino..."
+        state.sync_status_text = (
+            f"Deleting all stored races from the {_device_name_or(state, 'controller')}..."
+        )
         deleted_count = _delete_all_races_on_arduino(ser, state)
-        state.sync_status_text = f"Deleted {deleted_count} stored race(s) from the Arduino."
+        state.sync_status_text = (
+            f"Deleted {deleted_count} stored race(s) from the {_device_name_or(state, 'controller')}."
+        )
     except Exception as exc:
         state.sync_status_text = f"Delete all failed: {exc}"
     finally:
@@ -571,11 +642,17 @@ def run_serial_worker(state):
         ser = serial.Serial(PORT, BAUD, timeout=0.1)
         time.sleep(2)
         ser.reset_input_buffer()
+        state.device_type = _identify_connected_device(ser, state)
         state.serial_connected = True
-        state.status = f"Connected to {PORT}"
+        state.status = (
+            f"Connected to {PORT} ({_device_name(state)})"
+            if _device_name(state)
+            else f"Connected to {PORT} (unknown controller)"
+        )
         print(state.status)
     except Exception as exc:
         state.serial_connected = False
+        state.device_type = None
         state.status = f"Serial error: {exc}"
         print(state.status)
         return
@@ -669,6 +746,7 @@ def run_serial_worker(state):
         print(state.status)
     finally:
         state.serial_connected = False
+        state.device_type = None
         state.sync_in_progress = False
         state.delete_requested_race_id = None
         state.delete_all_requested = False

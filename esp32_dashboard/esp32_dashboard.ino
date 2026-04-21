@@ -1,5 +1,7 @@
+#include <FS.h>
 #include <SPI.h>
 #include <SD.h>
+#include <SD_MMC.h>
 #include <TinyGPS++.h>
 #include <string.h>
 
@@ -8,15 +10,28 @@
 // - GPS UART2: GPS TX -> GPIO16, GPS RX -> GPIO17
 // - Hall sensor: GPIO25
 // - Start/stop button: GPIO27 (to GND when pressed)
-// - SD card SPI: SCK=18, MISO=19, MOSI=23, CS=5
+// - Storage can use either:
+//   - external SPI microSD: SCK=18, MISO=19, MOSI=23, CS=5
+//   - onboard microSD slot via SD_MMC (board-specific wiring)
 const byte hallPin = 25;
 const byte buttonPin = 27;
 const byte gpsRxPin = 16;
 const byte gpsTxPin = 17;
+
+#define STORAGE_BACKEND_SD_SPI 1
+#define STORAGE_BACKEND_SD_MMC 2
+
+// Change this to STORAGE_BACKEND_SD_MMC when using an onboard microSD slot.
+#ifndef STORAGE_BACKEND
+#define STORAGE_BACKEND STORAGE_BACKEND_SD_SPI
+#endif
+
+#if STORAGE_BACKEND == STORAGE_BACKEND_SD_SPI
 const byte sdSckPin = 18;
 const byte sdMisoPin = 19;
 const byte sdMosiPin = 23;
 const byte chipSelect = 5;
+#endif
 
 const unsigned long debounceDelay = 50;
 const unsigned long dashboardSendInterval = 100;
@@ -47,6 +62,39 @@ unsigned long lastBackgroundTelemetryTime = 0;
 char currentRaceFilename[12] = "";
 char commandBuffer[32] = "";
 byte commandLength = 0;
+
+fs::FS& storageFs() {
+#if STORAGE_BACKEND == STORAGE_BACKEND_SD_MMC
+  return SD_MMC;
+#else
+  return SD;
+#endif
+}
+
+bool storageBegin() {
+#if STORAGE_BACKEND == STORAGE_BACKEND_SD_MMC
+  return SD_MMC.begin("/sdcard");
+#else
+  SPI.begin(sdSckPin, sdMisoPin, sdMosiPin, chipSelect);
+  return SD.begin(chipSelect, SPI);
+#endif
+}
+
+File storageOpenRoot() {
+  return storageFs().open("/");
+}
+
+File storageOpenFile(const char* path, uint8_t mode) {
+  return storageFs().open(path, mode);
+}
+
+bool storageExists(const char* path) {
+  return storageFs().exists(path);
+}
+
+bool storageRemove(const char* path) {
+  return storageFs().remove(path);
+}
 
 unsigned long readHallCount() {
   portENTER_CRITICAL(&hallCountMux);
@@ -140,7 +188,7 @@ unsigned long extractRaceSequence(const char* filename) {
 
 unsigned long findNextRaceSequence() {
   unsigned long maxSequence = 0;
-  File root = SD.open("/");
+  File root = storageOpenRoot();
   if (!root) {
     return 1;
   }
@@ -169,16 +217,16 @@ bool copyFile(const char* sourceName, const char* targetName) {
   buildSdPath(sourceName, sourcePath, sizeof(sourcePath));
   buildSdPath(targetName, targetPath, sizeof(targetPath));
 
-  File sourceFile = SD.open(sourcePath, FILE_READ);
+  File sourceFile = storageOpenFile(sourcePath, FILE_READ);
   if (!sourceFile) {
     return false;
   }
 
-  if (SD.exists(targetPath)) {
-    SD.remove(targetPath);
+  if (storageExists(targetPath)) {
+    storageRemove(targetPath);
   }
 
-  File targetFile = SD.open(targetPath, FILE_WRITE);
+  File targetFile = storageOpenFile(targetPath, FILE_WRITE);
   if (!targetFile) {
     sourceFile.close();
     return false;
@@ -200,7 +248,7 @@ void pruneSyncedRaces() {
     unsigned long oldestSequence = 0;
     char oldestFilename[16] = "";
 
-    File root = SD.open("/");
+    File root = storageOpenRoot();
     if (!root) {
       return;
     }
@@ -233,7 +281,7 @@ void pruneSyncedRaces() {
 
     char oldestPath[20];
     buildSdPath(oldestFilename, oldestPath, sizeof(oldestPath));
-    SD.remove(oldestPath);
+    storageRemove(oldestPath);
   }
 }
 
@@ -359,7 +407,7 @@ bool startRaceLogging() {
 
   char racePath[20];
   buildSdPath(currentRaceFilename, racePath, sizeof(racePath));
-  raceFile = SD.open(racePath, FILE_WRITE);
+  raceFile = storageOpenFile(racePath, FILE_WRITE);
   if (!raceFile) {
     currentRaceFilename[0] = '\0';
     Serial.println(F("ERROR:RACE_OPEN_FAILED"));
@@ -489,7 +537,7 @@ void sendRaceList() {
 
   Serial.println(F("LIST:BEGIN"));
 
-  File root = SD.open("/");
+  File root = storageOpenRoot();
   if (root) {
     while (true) {
       File entry = root.openNextFile();
@@ -531,7 +579,7 @@ void sendRaceFile(const char* raceId) {
 
   char racePath[20];
   buildSdPath(raceId, racePath, sizeof(racePath));
-  File file = SD.open(racePath, FILE_READ);
+  File file = storageOpenFile(racePath, FILE_READ);
   if (!file) {
     Serial.println(F("ERROR:RACE_NOT_FOUND"));
     return;
@@ -599,8 +647,8 @@ void acknowledgeRace(const char* raceId) {
   buildSdPath(raceId, racePath, sizeof(racePath));
   buildSdPath(syncedFilename, syncedPath, sizeof(syncedPath));
 
-  if (!SD.exists(racePath)) {
-    if (SD.exists(syncedPath)) {
+  if (!storageExists(racePath)) {
+    if (storageExists(syncedPath)) {
       Serial.print(F("ACK:OK:"));
       Serial.println(raceId);
       return;
@@ -615,7 +663,7 @@ void acknowledgeRace(const char* raceId) {
     return;
   }
 
-  if (!SD.remove(racePath)) {
+  if (!storageRemove(racePath)) {
     Serial.println(F("ERROR:SYNC_REMOVE_FAILED"));
     return;
   }
@@ -644,13 +692,13 @@ void deleteStoredRace(const char* raceId) {
   char racePath[20];
   buildSdPath(raceId, racePath, sizeof(racePath));
 
-  if (!SD.exists(racePath)) {
+  if (!storageExists(racePath)) {
     Serial.print(F("DELETE:OK:"));
     Serial.println(raceId);
     return;
   }
 
-  if (!SD.remove(racePath)) {
+  if (!storageRemove(racePath)) {
     Serial.println(F("ERROR:DELETE_FAILED"));
     return;
   }
@@ -677,7 +725,7 @@ int deleteAllStoredRaces() {
     char filenameToDelete[16] = "";
     serviceGpsInput();
     serviceBackgroundTelemetry();
-    File root = SD.open("/");
+    File root = storageOpenRoot();
     if (!root) {
       Serial.println(F("ERROR:SD_OPEN_FAILED"));
       return -1;
@@ -709,7 +757,7 @@ int deleteAllStoredRaces() {
 
     char deletePath[20];
     buildSdPath(filenameToDelete, deletePath, sizeof(deletePath));
-    if (!SD.remove(deletePath)) {
+    if (!storageRemove(deletePath)) {
       Serial.println(F("ERROR:DELETE_FAILED"));
       return -1;
     }
@@ -759,6 +807,11 @@ void processCommand(char* command) {
   trimCommand(command);
   alignCommandPrefix(command);
   trimCommand(command);
+
+  if (strcmp(command, "CMD:IDENTIFY") == 0) {
+    Serial.println(F("DEVICE:ESP32"));
+    return;
+  }
 
   if (strcmp(command, "CMD:LIST") == 0) {
     sendRaceList();
@@ -830,13 +883,13 @@ void setup() {
 
   pinMode(hallPin, INPUT_PULLUP);
   pinMode(buttonPin, INPUT_PULLUP);
+#if STORAGE_BACKEND == STORAGE_BACKEND_SD_SPI
   pinMode(chipSelect, OUTPUT);
+#endif
 
   attachInterrupt(digitalPinToInterrupt(hallPin), hallISR, FALLING);
 
-  SPI.begin(sdSckPin, sdMisoPin, sdMosiPin, chipSelect);
-
-  if (SD.begin(chipSelect, SPI)) {
+  if (storageBegin()) {
     sdReady = true;
     Serial.println(F("SD:READY"));
   } else {
