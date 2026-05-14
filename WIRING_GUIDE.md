@@ -13,7 +13,8 @@ Both versions expect these external parts:
 
 - 1 hall-effect sensor for wheel or motor pulse counting
 - 1 momentary pushbutton for start/stop
-- 1 GPS module running at `9600` baud UART
+- 1 `ATGM336H` GPS module or equivalent running at `9600` baud UART
+- optional `GY-BNO08X` breakout with a `BNO08X`-family IMU on SPI if you want it installed now
 - microSD storage
 - either an onboard ESP32 microSD slot or an external SPI microSD module
 - 1 USB connection to the computer or Pi running the dashboard
@@ -24,6 +25,25 @@ Important behavior from the code:
 - The start/stop button uses `INPUT_PULLUP` and is considered pressed when the pin is pulled to `GND`.
 - The dashboard serial link runs at `115200`.
 - GPS serial runs at `9600`.
+- The current sketches can publish `IMU:` heading and yaw-rate data over serial when built with the `SparkFun BNO08x Arduino Library` and a working SPI-wired sensor is present.
+- If the IMU is absent, miswired, or the library is not installed, the sketches report `IMU:NOIMU`.
+
+## Module Notes
+
+This build is using:
+
+- `ATGM336H` as the UART GPS module
+- `GY-BNO08X` as the SPI IMU breakout
+
+For the wiring tables below:
+
+- treat the `ATGM336H` like a normal UART GPS using `TX`, `RX`, `GND`, and power
+- install the `SparkFun BNO08x Arduino Library` in the Arduino IDE if you want the sketches to talk to the IMU
+- on the pictured `GY-BNO08X`, the SPI labels are usually:
+  `SCL` = `SCK`, `SDA` = `MISO`, `ADO` = `MOSI`
+- for SPI mode, tie `PS0` high and `PS1` high at reset
+- the current firmware uses the breakout's `CS`, `INT`, and `RST` pins
+- power the breakout from `3V3` unless the exact board documentation explicitly says its `VCC` input is higher-voltage tolerant
 
 ## ESP32 Wiring
 
@@ -54,7 +74,9 @@ What still needs to be wired externally:
 
 - hall sensor to `GPIO25`
 - start/stop button to `GPIO27` and `GND`
-- GPS to `GPIO16` and `GPIO17`
+- optional SD activity LED to `GPIO26` and `GND`
+- `ATGM336H` GPS to `GPIO16` and `GPIO17`
+- optional `GY-BNO08X` IMU to the shared SPI bus on `GPIO18`, `GPIO19`, and `GPIO23`, plus `GPIO14`, `GPIO33`, and `GPIO32`
 - USB to the dashboard host
 
 Important limitation:
@@ -71,8 +93,15 @@ Important limitation:
 |---|---:|---|
 | Hall sensor output | `GPIO25` | Input with pull-up, active-low pulse |
 | Start/stop button | `GPIO27` | Wire button to ground |
-| GPS TX -> ESP32 RX | `GPIO16` | UART2 RX |
-| GPS RX <- ESP32 TX | `GPIO17` | UART2 TX, often optional |
+| SD activity LED | `GPIO26` | Optional external LED, lights during SD card access |
+| ATGM336H TX -> ESP32 RX | `GPIO16` | UART2 RX |
+| ATGM336H RX <- ESP32 TX | `GPIO17` | UART2 TX, often optional |
+| GY-BNO08X SCK (`SCL`) | `GPIO18` | Shared SPI clock |
+| GY-BNO08X MISO (`SDA`) | `GPIO19` | Shared SPI MISO |
+| GY-BNO08X MOSI (`ADO`) | `GPIO23` | Shared SPI MOSI |
+| GY-BNO08X CS | `GPIO14` | IMU chip select |
+| GY-BNO08X INT | `GPIO33` | IMU interrupt |
+| GY-BNO08X RST | `GPIO32` | IMU reset |
 | SD SCK | `GPIO18` | SPI clock |
 | SD MISO | `GPIO19` | SPI MISO |
 | SD MOSI | `GPIO23` | SPI MOSI |
@@ -90,10 +119,22 @@ Important limitation:
 | Hall sensor `VCC` | Module-rated supply |
 | Button leg 1 | `GPIO27` |
 | Button leg 2 | `GND` |
-| GPS `TX` | `GPIO16` |
-| GPS `RX` | `GPIO17` if used |
-| GPS `GND` | `GND` |
-| GPS `VCC` | Module-rated supply |
+| LED anode | `GPIO26` through `220 ohm` to `330 ohm` resistor |
+| LED cathode | `GND` |
+| ATGM336H `TX` | `GPIO16` |
+| ATGM336H `RX` | `GPIO17` if used |
+| ATGM336H `GND` | `GND` |
+| ATGM336H `VCC` | Module-rated supply |
+| GY-BNO08X `SCL` | `GPIO18` |
+| GY-BNO08X `SDA` | `GPIO19` |
+| GY-BNO08X `ADO` | `GPIO23` |
+| GY-BNO08X `CS` | `GPIO14` |
+| GY-BNO08X `INT` | `GPIO33` |
+| GY-BNO08X `RST` | `GPIO32` |
+| GY-BNO08X `PS0` | `3V3` |
+| GY-BNO08X `PS1` | `3V3` |
+| GY-BNO08X `GND` | `GND` |
+| GY-BNO08X `VCC` | `3V3` unless your exact breakout documentation explicitly allows a higher input voltage |
 | SD `SCK` | `GPIO18` |
 | SD `MISO` | `GPIO19` |
 | SD `MOSI` | `GPIO23` |
@@ -108,21 +149,32 @@ ESP32                    Module
 -----                    -------------------------
 GPIO25  ---------------> Hall sensor OUT
 GPIO27  ----button-----> GND
-GPIO16  <--------------- GPS TX
-GPIO17  ---------------> GPS RX   (optional on some GPS boards)
+GPIO26  ----resistor---> LED anode
+GND     ---------------- LED cathode
+GPIO16  <--------------- ATGM336H TX
+GPIO17  ---------------> ATGM336H RX   (optional on some GPS boards)
 GPIO18  ---------------> SD SCK
 GPIO19  <--------------- SD MISO
 GPIO23  ---------------> SD MOSI
 GPIO5   ---------------> SD CS
-GND     ---------------- Hall GND / GPS GND / SD GND
+GPIO18  ---------------> GY-BNO08X SCL / SCK
+GPIO19  <--------------- GY-BNO08X SDA / MISO
+GPIO23  ---------------> GY-BNO08X ADO / MOSI
+GPIO14  ---------------> GY-BNO08X CS
+GPIO33  <--------------- GY-BNO08X INT
+GPIO32  ---------------> GY-BNO08X RST
+3V3     ---------------- GY-BNO08X VCC / PS0 / PS1
+GND     ---------------- Hall GND / GPS GND / GY-BNO08X GND / SD GND
 USB     ---------------- Dashboard host
 ```
 
 ### ESP32 Power Notes
 
-- Use a GPS module that is safe with `3.3V` logic on its serial pins.
+- Use an `ATGM336H` breakout that is safe with `3.3V` logic on its serial pins.
 - Do not drive `GPIO16` with a raw `5V` GPS TX line.
-- Many ESP32 dev boards can power a GPS breakout from `3V3`.
+- Many ESP32 dev boards can power an `ATGM336H` breakout from `3V3`.
+- The BNO08X silicon is a `3.3V`-class device. On a generic `GY-BNO08X` board, do not assume `VCC` is `5V` safe unless the exact breakout documentation says so.
+- The IMU and external SD adapter share the same SPI clock and data lines. They must each have their own chip-select pin.
 - SD cards are `3.3V` devices. Use an SD breakout that is compatible with ESP32 logic and power.
 
 ## Arduino Wiring
@@ -134,6 +186,7 @@ This sketch looks like it was written for an Arduino with:
 - standard hardware SPI
 - `SoftwareSerial` on pins `8` and `9`
 - interrupt-capable pin `2`
+- optional `GY-BNO08X` on the board's hardware SPI pins plus dedicated `CS`, `INT`, and `RST`
 
 That lines up well with an Uno or Nano style board.
 
@@ -144,8 +197,14 @@ That lines up well with an Uno or Nano style board.
 | Hall sensor output | `D2` | Interrupt input, active-low pulse |
 | Start/stop button | `D4` | Wire button to ground |
 | Status LED | `D7` | Optional external LED |
-| GPS RX from module TX | `D8` | `SoftwareSerial` RX |
-| GPS TX to module RX | `D9` | `SoftwareSerial` TX |
+| ATGM336H RX from module TX | `D8` | `SoftwareSerial` RX |
+| ATGM336H TX to module RX | `D9` | `SoftwareSerial` TX |
+| GY-BNO08X SCK (`SCL`) | `D13` on Uno/Nano | Shared SPI clock |
+| GY-BNO08X MISO (`SDA`) | `D12` on Uno/Nano | Shared SPI MISO |
+| GY-BNO08X MOSI (`ADO`) | `D11` on Uno/Nano | Shared SPI MOSI |
+| GY-BNO08X CS | `D6` | IMU chip select |
+| GY-BNO08X INT | `D5` | IMU interrupt |
+| GY-BNO08X RST | `A0` on Uno/Nano | IMU reset |
 | SD CS | `D10` | SPI chip select |
 | SD MOSI | `D11` on Uno/Nano | Hardware SPI |
 | SD MISO | `D12` on Uno/Nano | Hardware SPI |
@@ -164,10 +223,20 @@ That lines up well with an Uno or Nano style board.
 | Button leg 2 | `GND` |
 | LED anode | `D7` through resistor |
 | LED cathode | `GND` |
-| GPS `TX` | `D8` |
-| GPS `RX` | `D9` if used |
-| GPS `GND` | `GND` |
-| GPS `VCC` | Module-rated supply |
+| ATGM336H `TX` | `D8` |
+| ATGM336H `RX` | `D9` if used |
+| ATGM336H `GND` | `GND` |
+| ATGM336H `VCC` | Module-rated supply |
+| GY-BNO08X `SCL` | `D13` on Uno/Nano |
+| GY-BNO08X `SDA` | `D12` on Uno/Nano |
+| GY-BNO08X `ADO` | `D11` on Uno/Nano |
+| GY-BNO08X `CS` | `D6` |
+| GY-BNO08X `INT` | `D5` |
+| GY-BNO08X `RST` | `A0` on Uno/Nano |
+| GY-BNO08X `PS0` | `3V3` |
+| GY-BNO08X `PS1` | `3V3` |
+| GY-BNO08X `GND` | `GND` |
+| GY-BNO08X `VCC` | `3V3` unless your exact breakout documentation explicitly allows a higher input voltage |
 | SD `CS` | `D10` |
 | SD `MOSI` | `D11` on Uno/Nano |
 | SD `MISO` | `D12` on Uno/Nano |
@@ -195,6 +264,18 @@ Wire a simple normally-open pushbutton:
 
 Do not add an external pull-up unless you have a reason. The sketch already enables the internal pull-up.
 
+### GY-BNO08X IMU
+
+The `GY-BNO08X` is now configured for SPI in both sketches:
+
+- install the `SparkFun BNO08x Arduino Library` before compiling
+- on the pictured breakout, `SCL` is `SCK`, `SDA` is `MISO`, and `ADO` is `MOSI`
+- for SPI mode, tie `PS0` high and `PS1` high
+- `CS`, `INT`, and `RST` must be wired
+- ESP32 SPI suggestion: `GPIO18` / `GPIO19` / `GPIO23` with `CS=GPIO14`, `INT=GPIO33`, `RST=GPIO32`
+- Arduino SPI suggestion: `D13` / `D12` / `D11` with `CS=D6`, `INT=D5`, `RST=A0`
+- the sketches publish `IMU:heading_deg,yaw_rate_dps,imu_ok` when the sensor is available, otherwise `IMU:NOIMU`
+
 ## Host Connection
 
 The dashboard app talks to the microcontroller over USB serial:
@@ -211,13 +292,17 @@ If you run the dashboard on Windows, you will likely need to set `ELECTRATHON_PO
 3. Insert a formatted SD card.
 4. Open the serial monitor at `115200`.
 5. Confirm you see `SD:READY`.
-6. Wait for GPS output such as `GPS:...` or `GPS:NOFIX`.
-7. Press the button and confirm `LOG:1` and a `RACEFILE:Rxxxxxx.CSV` message.
-8. Trigger the hall sensor and confirm `COUNT:` increases.
+6. If the IMU is wired and the library is installed, confirm you start seeing `IMU:` lines. If not, expect `IMU:NOIMU`.
+7. Wait for GPS output such as `GPS:...` or `GPS:NOFIX`.
+8. Press the button and confirm `LOG:1` and a `RACEFILE:Rxxxxxx.CSV` message.
+9. If you wired the optional ESP32 LED, confirm it lights during SD card activity such as race logging or file transfer.
+10. Trigger the hall sensor and confirm `COUNT:` increases.
 
 ## Practical Notes
 
-- The ESP32 sketch does not use the separate external LED that the Arduino sketch uses on `D7`.
+- The ESP32 sketch now supports an optional external SD activity LED on `GPIO26`. If that pin conflicts with your board, change `statusLedPin` near the top of `esp32_dashboard/esp32_dashboard.ino`.
 - The dashboard calculates RPM using `MAGNETS_PER_REV` from `config.py`. If you use more than one magnet, set that value correctly.
-- If your GPS module only needs one data wire, you can usually leave the module `RX` unconnected and still read position data.
+- If your `ATGM336H` only needs one data wire, you can usually leave the module `RX` unconnected and still read position data.
+- On a `5V` Arduino, verify whether the `ATGM336H` module `RX` pin is `5V` tolerant before connecting `D9`; if not, leave it unconnected or level-shift it.
+- On a `5V` Uno or Nano, do not drive the `GY-BNO08X` SPI and control pins directly unless your breakout explicitly level-shifts them. Use a `3.3V` MCU or proper level shifting.
 - When using an onboard ESP32 microSD slot, the SD wiring is internal to the board, so the external SD rows in the ESP32 tables do not apply.

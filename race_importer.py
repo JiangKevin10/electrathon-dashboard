@@ -25,6 +25,9 @@ IMPORTED_RACE_HEADER = [
     "gps_satellites",
     "gps_utc_date",
     "gps_utc_time",
+    "imu_heading_deg",
+    "imu_yaw_rate_dps",
+    "imu_ok",
 ]
 RPM_MEASUREMENT_WINDOW_SECONDS = 2.0
 
@@ -163,6 +166,9 @@ def _build_imported_rows(
         gps_satellites = _parse_int(raw_row.get("gps_satellites"), default=0)
         gps_utc_date = str(raw_row.get("gps_utc_date", "") or "").strip()
         gps_utc_time = str(raw_row.get("gps_utc_time", "") or "").strip()
+        imu_heading_deg = str(raw_row.get("imu_heading_deg", "") or "").strip()
+        imu_yaw_rate_dps = str(raw_row.get("imu_yaw_rate_dps", "") or "").strip()
+        imu_ok = 1 if _parse_bool(raw_row.get("imu_ok")) else 0
 
         if rpm_samples and count < rpm_samples[-1][1]:
             rpm_samples.clear()
@@ -203,6 +209,9 @@ def _build_imported_rows(
                 gps_satellites,
                 gps_utc_date,
                 gps_utc_time,
+                imu_heading_deg,
+                imu_yaw_rate_dps,
+                imu_ok,
             ]
         )
 

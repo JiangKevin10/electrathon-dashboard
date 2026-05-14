@@ -10,11 +10,15 @@
 // - GPS UART2: GPS TX -> GPIO16, GPS RX -> GPIO17
 // - Hall sensor: GPIO25
 // - Start/stop button: GPIO27 (to GND when pressed)
+// - Status LED while logging: GPIO26
 // - Storage can use either:
 //   - external SPI microSD: SCK=18, MISO=19, MOSI=23, CS=5
 //   - onboard microSD slot via SD_MMC (board-specific wiring)
+// ESP32 GPIO is 3.3V-only. Do not feed 5V signals directly into the GPS, hall,
+// button, or SPI-connected pins without proper level shifting.
 const byte hallPin = 25;
 const byte buttonPin = 27;
+const byte statusLedPin = 26;
 const byte gpsRxPin = 16;
 const byte gpsTxPin = 17;
 
@@ -37,6 +41,7 @@ const unsigned long debounceDelay = 50;
 const unsigned long dashboardSendInterval = 100;
 const unsigned long gpsNoFixReportInterval = 2000;
 const unsigned long rawLogWriteInterval = 500;
+const unsigned long imuSendInterval = 250;
 const byte syncedRaceRetentionCount = 5;
 
 HardwareSerial gpsSerial(2);
@@ -53,7 +58,9 @@ bool stableButtonState = HIGH;
 
 unsigned long lastDebounceTime = 0;
 unsigned long lastDashboardSendTime = 0;
-unsigned long lastGpsNoFixReportTime = 0;
+unsigned long lastGpsLocationNoFixReportTime = 0;
+unsigned long lastGpsTimeNoFixReportTime = 0;
+unsigned long lastImuSendTime = 0;
 unsigned long lastRawLogTime = 0;
 unsigned long raceStartMillis = 0;
 unsigned long raceStartCount = 0;
@@ -62,6 +69,11 @@ unsigned long lastBackgroundTelemetryTime = 0;
 char currentRaceFilename[12] = "";
 char commandBuffer[32] = "";
 byte commandLength = 0;
+
+struct StorageActivityScope {
+  StorageActivityScope() {}
+  ~StorageActivityScope() {}
+};
 
 fs::FS& storageFs() {
 #if STORAGE_BACKEND == STORAGE_BACKEND_SD_MMC
@@ -72,6 +84,7 @@ fs::FS& storageFs() {
 }
 
 bool storageBegin() {
+  StorageActivityScope activity;
 #if STORAGE_BACKEND == STORAGE_BACKEND_SD_MMC
   return SD_MMC.begin("/sdcard");
 #else
@@ -84,7 +97,7 @@ File storageOpenRoot() {
   return storageFs().open("/");
 }
 
-File storageOpenFile(const char* path, uint8_t mode) {
+File storageOpenFile(const char* path, const char* mode) {
   return storageFs().open(path, mode);
 }
 
@@ -107,6 +120,15 @@ void resetHallCount() {
   portENTER_CRITICAL(&hallCountMux);
   count = 0;
   portEXIT_CRITICAL(&hallCountMux);
+}
+
+void sendImuState(unsigned long now) {
+  if (now - lastImuSendTime < imuSendInterval) {
+    return;
+  }
+
+  Serial.println(F("IMU:NOIMU"));
+  lastImuSendTime = now;
 }
 
 bool isDigitChar(char value) {
@@ -362,6 +384,8 @@ void writeRaceSample(bool forceWrite) {
     return;
   }
 
+  StorageActivityScope activity;
+
   const unsigned long currentCount = readHallCount();
   const unsigned long elapsedMs = now - raceStartMillis;
   const unsigned long sessionCount = currentCount - raceStartCount;
@@ -390,7 +414,11 @@ void writeRaceSample(bool forceWrite) {
   raceFile.print(",");
   raceFile.print(gpsDateBuffer);
   raceFile.print(",");
-  raceFile.println(gpsTimeBuffer);
+  raceFile.print(gpsTimeBuffer);
+  raceFile.print(",");
+  raceFile.print(",");
+  raceFile.print(",");
+  raceFile.println(0);
   raceFile.flush();
 
   lastRawLogTime = now;
@@ -401,6 +429,8 @@ bool startRaceLogging() {
     Serial.println(F("ERROR:SD_NOT_READY"));
     return false;
   }
+
+  StorageActivityScope activity;
 
   const unsigned long nextSequence = findNextRaceSequence();
   snprintf(currentRaceFilename, sizeof(currentRaceFilename), "R%06lu.CSV", nextSequence);
@@ -414,7 +444,9 @@ bool startRaceLogging() {
     return false;
   }
 
-  raceFile.println("elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time");
+  raceFile.println(
+    "elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time,imu_heading_deg,imu_yaw_rate_dps,imu_ok"
+  );
   raceFile.flush();
 
   resetHallCount();
@@ -422,6 +454,7 @@ bool startRaceLogging() {
   raceStartCount = 0;
   lastRawLogTime = 0;
   loggingState = true;
+  digitalWrite(statusLedPin, HIGH);
   Serial.print(F("RACEFILE:"));
   Serial.println(currentRaceFilename);
   writeRaceSample(true);
@@ -433,6 +466,8 @@ void stopRaceLogging() {
     return;
   }
 
+  StorageActivityScope activity;
+
   writeRaceSample(true);
 
   if (raceFile) {
@@ -441,6 +476,7 @@ void stopRaceLogging() {
   }
 
   loggingState = false;
+  digitalWrite(statusLedPin, LOW);
   resetHallCount();
   raceStartCount = 0;
   Serial.println(F("RACEFILE:"));
@@ -494,16 +530,18 @@ void sendDashboardState(unsigned long now) {
 void sendGpsUpdates(unsigned long now) {
   if (gps.location.isUpdated()) {
     sendGpsState();
-  } else if (!gps.location.isValid() && now - lastGpsNoFixReportTime >= gpsNoFixReportInterval) {
+    lastGpsLocationNoFixReportTime = now;
+  } else if (!gps.location.isValid() && now - lastGpsLocationNoFixReportTime >= gpsNoFixReportInterval) {
     Serial.println(F("GPS:NOFIX"));
-    lastGpsNoFixReportTime = now;
+    lastGpsLocationNoFixReportTime = now;
   }
 
   if (gps.date.isUpdated() || gps.time.isUpdated()) {
     sendGpsTimeState();
-  } else if ((!gps.date.isValid() || !gps.time.isValid()) && now - lastGpsNoFixReportTime >= gpsNoFixReportInterval) {
+    lastGpsTimeNoFixReportTime = now;
+  } else if ((!gps.date.isValid() || !gps.time.isValid()) && now - lastGpsTimeNoFixReportTime >= gpsNoFixReportInterval) {
     Serial.println(F("GPSTIME:NOFIX"));
-    lastGpsNoFixReportTime = now;
+    lastGpsTimeNoFixReportTime = now;
   }
 }
 
@@ -521,6 +559,7 @@ void serviceBackgroundTelemetry() {
 
   sendDashboardState(now);
   sendGpsUpdates(now);
+  sendImuState(now);
   lastBackgroundTelemetryTime = now;
 }
 
@@ -534,6 +573,8 @@ void sendRaceList() {
     Serial.println(F("ERROR:BUSY"));
     return;
   }
+
+  StorageActivityScope activity;
 
   Serial.println(F("LIST:BEGIN"));
 
@@ -577,6 +618,8 @@ void sendRaceFile(const char* raceId) {
     return;
   }
 
+  StorageActivityScope activity;
+
   char racePath[20];
   buildSdPath(raceId, racePath, sizeof(racePath));
   File file = storageOpenFile(racePath, FILE_READ);
@@ -590,7 +633,7 @@ void sendRaceFile(const char* raceId) {
   Serial.write(',');
   Serial.println(file.size());
 
-  char lineBuffer[96];
+  char lineBuffer[128];
   byte lineLength = 0;
   while (file.available()) {
     serviceGpsInput();
@@ -636,6 +679,8 @@ void acknowledgeRace(const char* raceId) {
     Serial.println(F("ERROR:INVALID_RACE_ID"));
     return;
   }
+
+  StorageActivityScope activity;
 
   char syncedFilename[16];
   strncpy(syncedFilename, raceId, sizeof(syncedFilename) - 1);
@@ -689,6 +734,8 @@ void deleteStoredRace(const char* raceId) {
     return;
   }
 
+  StorageActivityScope activity;
+
   char racePath[20];
   buildSdPath(raceId, racePath, sizeof(racePath));
 
@@ -717,6 +764,8 @@ int deleteAllStoredRaces() {
     Serial.println(F("ERROR:BUSY"));
     return -1;
   }
+
+  StorageActivityScope activity;
 
   int deletedCount = 0;
   Serial.println(F("DELETEALL:BEGIN"));
@@ -883,9 +932,12 @@ void setup() {
 
   pinMode(hallPin, INPUT_PULLUP);
   pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(statusLedPin, OUTPUT);
 #if STORAGE_BACKEND == STORAGE_BACKEND_SD_SPI
   pinMode(chipSelect, OUTPUT);
+  digitalWrite(chipSelect, HIGH);
 #endif
+  digitalWrite(statusLedPin, LOW);
 
   attachInterrupt(digitalPinToInterrupt(hallPin), hallISR, FALLING);
 
@@ -911,4 +963,5 @@ void loop() {
   const unsigned long now = millis();
   sendDashboardState(now);
   sendGpsUpdates(now);
+  sendImuState(now);
 }

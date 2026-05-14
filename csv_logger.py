@@ -34,6 +34,9 @@ def start_session_log(state, started_monotonic):
             "gps_satellites",
             "gps_utc_date",
             "gps_utc_time",
+            "imu_heading_deg",
+            "imu_yaw_rate_dps",
+            "imu_ok",
         ]
     )
 
@@ -77,6 +80,9 @@ def write_session_row(state):
             state.gps_satellites,
             state.gps_utc_date or "",
             state.gps_utc_time or "",
+            f"{state.imu_heading_deg:.2f}" if state.imu_heading_deg is not None else "",
+            f"{state.imu_yaw_rate_dps:.2f}" if state.imu_yaw_rate_dps is not None else "",
+            1 if state.imu_ok else 0,
         ]
     )
     csv_file.flush()

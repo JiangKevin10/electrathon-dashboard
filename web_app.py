@@ -226,7 +226,7 @@ HOME_TEMPLATE = """
             <header class="page-header">
                 <div>
                     <h1>Electrathon Dashboard</h1>
-                    <p>Live RPM, lap count, GPS status, and route tracking.</p>
+                    <p>Live RPM, lap count, GPS status, stored-race sync, and route tracking.</p>
                 </div>
                 <p><a href="{{ url_for('race_list') }}">View Saved Races</a></p>
             </header>
@@ -295,6 +295,13 @@ HOME_TEMPLATE = """
                             Open current position in Google Maps
                         </a>
                     </p>
+                </article>
+
+                <article class="card">
+                    <h2>IMU</h2>
+                    <p class="detail-line">Status: <b id="imu-status-text">{{ live_state.imu_status_text }}</b></p>
+                    <p class="detail-line">Heading: <b id="imu-heading-text">{{ live_state.imu_heading_text }}</b></p>
+                    <p class="detail-line">Yaw Rate: <b id="imu-yaw-rate-text">{{ live_state.imu_yaw_rate_text }}</b></p>
                 </article>
 
                 <article class="card">
@@ -373,9 +380,10 @@ HOME_TEMPLATE = """
                 </article>
 
                 <article class="card">
-                    <h3>Raw GPS Serial</h3>
+                    <h3>Raw Serial</h3>
                     <p class="detail-line">GPS: <code id="raw-gps-line">{{ live_state.last_raw_gps_line }}</code></p>
                     <p class="detail-line">GPSTIME: <code id="raw-gpstime-line">{{ live_state.last_raw_gpstime_line }}</code></p>
+                    <p class="detail-line">IMU: <code id="raw-imu-line">{{ live_state.last_raw_imu_line }}</code></p>
                 </article>
             </section>
         </main>
@@ -542,8 +550,12 @@ HOME_TEMPLATE = """
                 document.getElementById("start-zone-center-text").textContent = data.start_zone_center_text;
                 document.getElementById("start-zone-radius-text").textContent = data.start_zone_radius_text;
                 document.getElementById("minimum-lap-text").textContent = data.minimum_lap_text;
+                document.getElementById("imu-status-text").textContent = data.imu_status_text;
+                document.getElementById("imu-heading-text").textContent = data.imu_heading_text;
+                document.getElementById("imu-yaw-rate-text").textContent = data.imu_yaw_rate_text;
                 document.getElementById("raw-gps-line").textContent = data.last_raw_gps_line;
                 document.getElementById("raw-gpstime-line").textContent = data.last_raw_gpstime_line;
+                document.getElementById("raw-imu-line").textContent = data.last_raw_imu_line;
                 document.getElementById("sync-status-text").textContent = data.sync_status_text;
                 updateRaceLink("current-file", data.current_session_name, data.current_session_url, data.current_session_text);
                 updateRaceLink("last-file", data.last_session_name, data.last_session_url, data.last_session_text);
@@ -1598,7 +1610,7 @@ def _device_text(state):
 
 
 def _is_hall_only_controller(state):
-    return state.device_type == "esp32"
+    return False
 
 
 def _session_available(state):
@@ -1617,6 +1629,9 @@ def _live_state_payload(state):
     session_available = _session_available(state)
     gps_available = _gps_available(state)
     storage_available = _storage_available(state)
+    imu_available = state.serial_connected
+    imu_line = str(state.last_raw_imu_line or "").strip().upper()
+    imu_missing = imu_line in {"IMU:NOIMU", "IMU:DISCONNECTED"}
     not_available_text = "Not available"
     started_text = (
         state.session_started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -1661,6 +1676,21 @@ def _live_state_payload(state):
         )
         if gps_available
         else not_available_text
+    )
+    imu_status_text = (
+        "Not installed"
+        if imu_missing
+        else ("READY" if state.imu_ok else "Waiting for IMU data")
+    ) if imu_available else not_available_text
+    imu_heading_text = (
+        f"{state.imu_heading_deg:.2f} deg"
+        if state.imu_heading_deg is not None
+        else ("Not available" if imu_missing else ("Unknown" if imu_available else not_available_text))
+    )
+    imu_yaw_rate_text = (
+        f"{state.imu_yaw_rate_dps:.2f} deg/s"
+        if state.imu_yaw_rate_dps is not None
+        else ("Not available" if imu_missing else ("Unknown" if imu_available else not_available_text))
     )
     start_zone = _start_zone_payload(state) if gps_available else None
     start_zone_center_text = (
@@ -1737,6 +1767,9 @@ def _live_state_payload(state):
         "gps_longitude_text": gps_longitude_text,
         "gps_maps_url": gps_maps_url,
         "gps_time_text": gps_time_text,
+        "imu_status_text": imu_status_text,
+        "imu_heading_text": imu_heading_text,
+        "imu_yaw_rate_text": imu_yaw_rate_text,
         "start_zone_active": start_zone is not None,
         "start_zone_center_text": start_zone_center_text,
         "start_zone_radius_text": start_zone_radius_text,
@@ -1746,6 +1779,7 @@ def _live_state_payload(state):
         "start_zone_status_text": _start_zone_status_text(state) if gps_available else not_available_text,
         "last_raw_gps_line": state.last_raw_gps_line if gps_available else not_available_text,
         "last_raw_gpstime_line": state.last_raw_gpstime_line if gps_available else not_available_text,
+        "last_raw_imu_line": state.last_raw_imu_line if imu_available else not_available_text,
         "sync_status_text": state.sync_status_text if storage_available else not_available_text,
         "sync_in_progress": storage_available and state.sync_in_progress,
         "sync_progress_active": sync_progress_active,

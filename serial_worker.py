@@ -135,6 +135,27 @@ def _handle_live_serial_line(state, line, now):
             state.gps_utc_time = time_parts[1]
         return True
 
+    if line.startswith("IMU:"):
+        if line != state.last_raw_imu_line:
+            print(f"[{_device_name_or(state, 'SERIAL').upper()}] {line}")
+        state.last_raw_imu_line = line
+        imu_payload = line.split(":", 1)[1].strip()
+        if imu_payload in {"NOIMU", "DISCONNECTED"}:
+            state.imu_heading_deg = None
+            state.imu_yaw_rate_dps = None
+            state.imu_ok = False
+            return True
+
+        imu_parts = imu_payload.split(",")
+        if len(imu_parts) >= 3:
+            try:
+                state.imu_heading_deg = float(imu_parts[0])
+                state.imu_yaw_rate_dps = float(imu_parts[1])
+                state.imu_ok = int(imu_parts[2]) == 1
+            except ValueError:
+                pass
+        return True
+
     return False
 
 
@@ -757,8 +778,12 @@ def run_serial_worker(state):
         state.gps_satellites = 0
         state.gps_utc_date = None
         state.gps_utc_time = None
+        state.imu_heading_deg = None
+        state.imu_yaw_rate_dps = None
+        state.imu_ok = False
         state.last_raw_gps_line = "Waiting for GPS serial data"
         state.last_raw_gpstime_line = "Waiting for GPS time data"
+        state.last_raw_imu_line = "Waiting for IMU serial data"
         state.live_route_points = []
         state.current_race_id = None
         _reset_sync_progress(state)

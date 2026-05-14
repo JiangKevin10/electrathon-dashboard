@@ -11,8 +11,12 @@ class SharedState:
         self.gps_satellites = 0
         self.gps_utc_date = None
         self.gps_utc_time = None
+        self.imu_heading_deg = None
+        self.imu_yaw_rate_dps = None
+        self.imu_ok = False
         self.last_raw_gps_line = "Waiting for GPS serial data"
         self.last_raw_gpstime_line = "Waiting for GPS time data"
+        self.last_raw_imu_line = "Waiting for IMU serial data"
         self.session_requested = False
         self.session_active = False
         self.status = "Starting..."

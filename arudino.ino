@@ -15,6 +15,7 @@ const unsigned long debounceDelay = 50;
 const unsigned long dashboardSendInterval = 100;
 const unsigned long gpsNoFixReportInterval = 2000;
 const unsigned long rawLogWriteInterval = 500;
+const unsigned long imuSendInterval = 250;
 const byte syncedRaceRetentionCount = 5;
 
 SoftwareSerial gpsSerial(gpsRxPin, gpsTxPin);
@@ -31,6 +32,7 @@ bool stableButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 unsigned long lastDashboardSendTime = 0;
 unsigned long lastGpsNoFixReportTime = 0;
+unsigned long lastImuSendTime = 0;
 unsigned long lastRawLogTime = 0;
 unsigned long raceStartMillis = 0;
 unsigned long raceStartCount = 0;
@@ -51,6 +53,15 @@ void resetHallCount() {
   noInterrupts();
   count = 0;
   interrupts();
+}
+
+void sendImuState(unsigned long now) {
+  if (now - lastImuSendTime < imuSendInterval) {
+    return;
+  }
+
+  Serial.println(F("IMU:NOIMU"));
+  lastImuSendTime = now;
 }
 
 bool isDigitChar(char value) {
@@ -292,7 +303,11 @@ void writeRaceSample(bool forceWrite) {
   raceFile.print(",");
   raceFile.print(gpsDateBuffer);
   raceFile.print(",");
-  raceFile.println(gpsTimeBuffer);
+  raceFile.print(gpsTimeBuffer);
+  raceFile.print(",");
+  raceFile.print(",");
+  raceFile.print(",");
+  raceFile.println(0);
   raceFile.flush();
 
   lastRawLogTime = now;
@@ -314,7 +329,9 @@ bool startRaceLogging() {
     return false;
   }
 
-  raceFile.println("elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time");
+  raceFile.println(
+    "elapsed_ms,count,latitude,longitude,gps_fix,gps_satellites,gps_utc_date,gps_utc_time,imu_heading_deg,imu_yaw_rate_dps,imu_ok"
+  );
   raceFile.flush();
 
   resetHallCount();
@@ -423,6 +440,7 @@ void serviceBackgroundTelemetry() {
 
   sendDashboardState(now);
   sendGpsUpdates(now);
+  sendImuState(now);
   lastBackgroundTelemetryTime = now;
 }
 
@@ -490,7 +508,7 @@ void sendRaceFile(const char* raceId) {
   Serial.write(',');
   Serial.println(file.size());
 
-  char lineBuffer[96];
+  char lineBuffer[128];
   byte lineLength = 0;
   while (file.available()) {
     serviceGpsInput();
@@ -774,6 +792,8 @@ void setup() {
   pinMode(ledPin, OUTPUT);
   pinMode(chipSelect, OUTPUT);
 
+  digitalWrite(chipSelect, HIGH);
+
   attachInterrupt(digitalPinToInterrupt(hallPin), hallISR, FALLING);
 
   digitalWrite(ledPin, LOW);
@@ -800,4 +820,5 @@ void loop() {
   const unsigned long now = millis();
   sendDashboardState(now);
   sendGpsUpdates(now);
+  sendImuState(now);
 }
