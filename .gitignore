@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 CSV-LOGS/
+dashboard_settings.json
