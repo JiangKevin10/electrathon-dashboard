@@ -1,3 +1,4 @@
+import os
 from collections import deque
 
 import serial
@@ -8,6 +9,8 @@ from config import PORT, BAUD, CONTROLLER_TYPE, MAGNETS_PER_REV
 from csv_logger import start_session_log, write_session_row, stop_session_log
 from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
 from race_importer import archive_and_import_raw_race
+
+DEBUG_SERIAL = os.getenv("ELECTRATHON_DEBUG_SERIAL", "").strip() in {"1", "true", "yes", "on"}
 
 RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
@@ -680,7 +683,17 @@ def _delete_all_stored_races(ser, state):
 
 def run_serial_worker(state):
     try:
+        print(f"[SERIAL] Opening {PORT} @ {BAUD}")
         ser = serial.Serial(PORT, BAUD, timeout=0.1)
+        # ESP32 classic boards wire DTR -> EN (reset) and RTS -> IO0 (boot mode).
+        # pyserial asserts both by default on open, which can hold the ESP32 in
+        # reset. Miniterm doesn't do this, which is why miniterm works while
+        # the dashboard sees no data. Deassert both immediately.
+        try:
+            ser.dtr = False
+            ser.rts = False
+        except (OSError, AttributeError) as control_exc:
+            print(f"[SERIAL] Could not deassert DTR/RTS: {control_exc}")
         time.sleep(2)
         ser.reset_input_buffer()
         state.device_type = _identify_connected_device(ser, state)
@@ -709,6 +722,8 @@ def run_serial_worker(state):
             now = time.monotonic()
 
             if line:
+                if DEBUG_SERIAL:
+                    print(f"[SERIAL<<] {line}")
                 _handle_live_serial_line(state, line, now)
 
             if state.count < rpm_samples[-1][1]:
