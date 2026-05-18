@@ -764,8 +764,8 @@ HOME_TEMPLATE = """
 
             applyLiveState(lastLiveState, { syncControls: true });
 
-            setInterval(refreshLiveState, 250);
-            setInterval(refreshLiveRoute, 1000);
+            setInterval(refreshLiveState, 100);
+            setInterval(refreshLiveRoute, 500);
         </script>
     </body>
 </html>

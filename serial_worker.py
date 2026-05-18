@@ -13,7 +13,7 @@ from race_importer import archive_and_import_raw_race
 DEBUG_SERIAL = os.getenv("ELECTRATHON_DEBUG_SERIAL", "").strip() in {"1", "true", "yes", "on"}
 COUNT_DEBOUNCE_SECONDS = float(os.getenv("ELECTRATHON_COUNT_DEBOUNCE_SECONDS", "0.5"))
 
-RPM_UPDATE_INTERVAL = 0.25
+RPM_UPDATE_INTERVAL = 0.1
 RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
 IDENTIFY_TIMEOUT_SECONDS = 2.0
