@@ -2,7 +2,9 @@ from collections import deque
 
 import serial
 import time
-from config import PORT, BAUD, MAGNETS_PER_REV
+from pathlib import Path
+
+from config import PORT, BAUD, CONTROLLER_TYPE, MAGNETS_PER_REV
 from csv_logger import start_session_log, write_session_row, stop_session_log
 from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
 from race_importer import archive_and_import_raw_race
@@ -32,7 +34,22 @@ def _device_name_or(state, fallback):
     return _device_name(state) or fallback
 
 
+def _normalize_device_type(device_type):
+    normalized = str(device_type or "").strip().lower()
+    return normalized if normalized in {"arduino", "esp32"} else None
+
+
+def _device_type_from_port():
+    if Path(str(PORT)).name.startswith("ttyUSB"):
+        return "esp32"
+    return None
+
+
 def _identify_connected_device(ser, state):
+    configured_device_type = _normalize_device_type(CONTROLLER_TYPE)
+    if configured_device_type:
+        return configured_device_type
+
     def run():
         ser.reset_input_buffer()
         _send_command(ser, "CMD:IDENTIFY")
@@ -42,6 +59,9 @@ def _identify_connected_device(ser, state):
 
             if line.startswith("DEVICE:"):
                 payload = line.split(":", 1)[1].strip().upper()
+                inferred_device_type = _device_type_from_port()
+                if inferred_device_type:
+                    return inferred_device_type
                 if payload == "ARDUINO":
                     return "arduino"
                 if payload == "ESP32":

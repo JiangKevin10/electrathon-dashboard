@@ -21,6 +21,7 @@ const byte buttonPin = 27;
 const byte statusLedPin = 26;
 const byte gpsRxPin = 16;
 const byte gpsTxPin = 17;
+const char deviceIdentity[] = "ESP32";
 
 #define STORAGE_BACKEND_SD_SPI 1
 #define STORAGE_BACKEND_SD_MMC 2
@@ -858,7 +859,8 @@ void processCommand(char* command) {
   trimCommand(command);
 
   if (strcmp(command, "CMD:IDENTIFY") == 0) {
-    Serial.println(F("DEVICE:ESP32"));
+    Serial.print(F("DEVICE:"));
+    Serial.println(deviceIdentity);
     return;
   }
 

@@ -21,6 +21,7 @@ def default_serial_port():
 
 PORT = default_serial_port()
 BAUD = int(os.getenv("ELECTRATHON_BAUD", "115200"))
+CONTROLLER_TYPE = os.getenv("ELECTRATHON_CONTROLLER_TYPE", "").strip().lower()
 MAGNETS_PER_REV = int(os.getenv("ELECTRATHON_MAGNETS_PER_REV", "1"))
 LOG_FOLDER = Path(
     os.getenv("ELECTRATHON_LOG_FOLDER", str(BASE_DIR / "CSV-LOGS"))
