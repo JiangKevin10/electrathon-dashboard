@@ -11,6 +11,7 @@ from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
 from race_importer import archive_and_import_raw_race
 
 DEBUG_SERIAL = os.getenv("ELECTRATHON_DEBUG_SERIAL", "").strip() in {"1", "true", "yes", "on"}
+COUNT_DEBOUNCE_SECONDS = float(os.getenv("ELECTRATHON_COUNT_DEBOUNCE_SECONDS", "0.5"))
 
 RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
@@ -97,10 +98,38 @@ def _append_live_route_point(state):
     state.live_route_points.append(point)
 
 
+def _handle_count_line(state, raw_count, now):
+    if state.device_type != "esp32":
+        state.count = raw_count
+        return
+
+    previous_raw_count = state.controller_raw_count
+    if previous_raw_count is None:
+        state.controller_raw_count = raw_count
+        return
+
+    if raw_count < previous_raw_count:
+        state.controller_raw_count = raw_count
+        state.count = 0
+        state.last_count_accept_monotonic = None
+        return
+
+    if raw_count == previous_raw_count:
+        return
+
+    state.controller_raw_count = raw_count
+    if (
+        state.last_count_accept_monotonic is None
+        or now - state.last_count_accept_monotonic >= COUNT_DEBOUNCE_SECONDS
+    ):
+        state.count += 1
+        state.last_count_accept_monotonic = now
+
+
 def _handle_live_serial_line(state, line, now):
     if line.startswith("COUNT:"):
         try:
-            state.count = int(line.split(":", 1)[1])
+            _handle_count_line(state, int(line.split(":", 1)[1]), now)
         except ValueError:
             pass
         return True

@@ -4,6 +4,8 @@ from lap_tracker import DEFAULT_MINIMUM_LAP_SECONDS, DEFAULT_START_ZONE_RADIUS_M
 class SharedState:
     def __init__(self):
         self.count = 0
+        self.controller_raw_count = None
+        self.last_count_accept_monotonic = None
         self.rpm = 0.0
         self.gps_latitude = None
         self.gps_longitude = None
