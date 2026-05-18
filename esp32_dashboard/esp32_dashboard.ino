@@ -8,7 +8,7 @@ const byte statusLedPin = 26;
 
 const unsigned long dashboardSendInterval = 100;
 const unsigned long noFixSendInterval = 2000;
-const unsigned long hallPulseDebounceMillis = 500;
+const unsigned long hallPulseDebounceMillis = 5;
 
 volatile unsigned long count = 0;
 volatile unsigned long lastHallPulseMillis = 0;

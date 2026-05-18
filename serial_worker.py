@@ -11,9 +11,9 @@ from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
 from race_importer import archive_and_import_raw_race
 
 DEBUG_SERIAL = os.getenv("ELECTRATHON_DEBUG_SERIAL", "").strip() in {"1", "true", "yes", "on"}
-COUNT_DEBOUNCE_SECONDS = float(os.getenv("ELECTRATHON_COUNT_DEBOUNCE_SECONDS", "0.5"))
+COUNT_BURST_GAP_SECONDS = float(os.getenv("ELECTRATHON_COUNT_BURST_GAP_SECONDS", "0.10"))
 
-RPM_UPDATE_INTERVAL = 0.1
+RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
 LOG_WRITE_INTERVAL = 1.0
 IDENTIFY_TIMEOUT_SECONDS = 2.0
@@ -112,16 +112,17 @@ def _handle_count_line(state, raw_count, now):
         state.controller_raw_count = raw_count
         state.count = 0
         state.last_count_accept_monotonic = None
+        state.last_raw_count_change_monotonic = None
         return
 
     if raw_count == previous_raw_count:
         return
 
+    previous_raw_change = state.last_raw_count_change_monotonic
     state.controller_raw_count = raw_count
-    if (
-        state.last_count_accept_monotonic is None
-        or now - state.last_count_accept_monotonic >= COUNT_DEBOUNCE_SECONDS
-    ):
+    state.last_raw_count_change_monotonic = now
+
+    if previous_raw_change is None or now - previous_raw_change >= COUNT_BURST_GAP_SECONDS:
         state.count += 1
         state.last_count_accept_monotonic = now
 
