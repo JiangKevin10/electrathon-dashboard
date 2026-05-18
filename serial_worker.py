@@ -11,10 +11,7 @@ from lap_tracker import has_start_zone, reset_lap_tracking, update_lap_tracking
 from race_importer import archive_and_import_raw_race
 
 DEBUG_SERIAL = os.getenv("ELECTRATHON_DEBUG_SERIAL", "").strip() in {"1", "true", "yes", "on"}
-ESP32_RAW_PULSES_PER_COUNT = max(
-    1,
-    int(os.getenv("ELECTRATHON_ESP32_RAW_PULSES_PER_COUNT", "20")),
-)
+COUNT_DEBOUNCE_SECONDS = float(os.getenv("ELECTRATHON_COUNT_DEBOUNCE_SECONDS", "0.5"))
 
 RPM_UPDATE_INTERVAL = 0.25
 RPM_MEASUREMENT_WINDOW = 2.0
@@ -120,10 +117,13 @@ def _handle_count_line(state, raw_count, now):
     if raw_count == previous_raw_count:
         return
 
-    raw_delta = raw_count - previous_raw_count
     state.controller_raw_count = raw_count
-    state.count += max(1, round(raw_delta / ESP32_RAW_PULSES_PER_COUNT))
-    state.last_count_accept_monotonic = now
+    if (
+        state.last_count_accept_monotonic is None
+        or now - state.last_count_accept_monotonic >= COUNT_DEBOUNCE_SECONDS
+    ):
+        state.count += 1
+        state.last_count_accept_monotonic = now
 
 
 def _handle_live_serial_line(state, line, now):
