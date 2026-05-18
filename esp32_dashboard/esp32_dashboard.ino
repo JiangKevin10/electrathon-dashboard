@@ -8,8 +8,10 @@ const byte statusLedPin = 26;
 
 const unsigned long dashboardSendInterval = 100;
 const unsigned long noFixSendInterval = 2000;
+const unsigned long hallPulseDebounceMicros = 50000;
 
 volatile unsigned long count = 0;
+volatile unsigned long lastHallPulseMicros = 0;
 portMUX_TYPE hallCountMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool loggingState = false;
@@ -31,6 +33,7 @@ unsigned long readHallCount() {
 void resetHallCount() {
   portENTER_CRITICAL(&hallCountMux);
   count = 0;
+  lastHallPulseMicros = micros();
   portEXIT_CRITICAL(&hallCountMux);
 }
 
@@ -171,8 +174,12 @@ void handleButtonState() {
 }
 
 void IRAM_ATTR hallISR() {
+  const unsigned long now = micros();
   portENTER_CRITICAL_ISR(&hallCountMux);
-  count++;
+  if (now - lastHallPulseMicros >= hallPulseDebounceMicros) {
+    count++;
+    lastHallPulseMicros = now;
+  }
   portEXIT_CRITICAL_ISR(&hallCountMux);
 }
 
