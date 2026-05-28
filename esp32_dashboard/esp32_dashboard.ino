@@ -425,6 +425,8 @@ void handleButtonState() {
   if ((millis() - lastDebounceTime) > debounceDelay) {
     if (reading != stableButtonState) {
       stableButtonState = reading;
+      Serial.print(F("BUTTON:"));
+      Serial.println(stableButtonState == LOW ? F("DOWN") : F("UP"));
       if (stableButtonState == LOW) {
         if (loggingState) {
           stopRaceLogging();
