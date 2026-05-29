@@ -49,11 +49,13 @@ bool stableButtonState = HIGH;
 unsigned long lastDebounceTime = 0;
 unsigned long lastDashboardSendTime = 0;
 unsigned long lastGpsNoFixReportTime = 0;
+unsigned long lastGpsRxReportTime = 0;
 unsigned long lastRawLogTime = 0;
 unsigned long lastBackgroundTelemetryTime = 0;
 unsigned long lastImuHeartbeatTime = 0;
 unsigned long raceStartMillis = 0;
 unsigned long raceStartCount = 0;
+unsigned long gpsBytesReceived = 0;
 
 char currentRaceFilename[12] = "";  // e.g. "R000001.CSV"
 char commandBuffer[64] = "";
@@ -476,6 +478,12 @@ void sendGpsUpdates(unsigned long now) {
     Serial.println(F("GPSTIME:NOFIX"));
     lastGpsNoFixReportTime = now;
   }
+
+  if (now - lastGpsRxReportTime >= gpsNoFixReportInterval) {
+    Serial.print(F("GPSRX:"));
+    Serial.println(gpsBytesReceived);
+    lastGpsRxReportTime = now;
+  }
 }
 
 void sendImuHeartbeat(unsigned long now) {
@@ -491,6 +499,7 @@ void sendImuHeartbeat(unsigned long now) {
 void serviceGpsInput() {
   while (gpsSerial.available() > 0) {
     gps.encode(gpsSerial.read());
+    gpsBytesReceived++;
   }
 }
 
