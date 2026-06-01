@@ -75,7 +75,7 @@ What still needs to be wired externally:
 - hall sensor to `GPIO25`
 - start/stop button to `GPIO27` and `GND`
 - optional SD activity LED to `GPIO26` and `GND`
-- `ATGM336H` GPS to `GPIO16` and `GPIO17`
+- `ATGM336H` GPS to `GPIO17` and `GPIO16`
 - optional `GY-BNO08X` IMU to the shared SPI bus on `GPIO18`, `GPIO19`, and `GPIO23`, plus `GPIO14`, `GPIO33`, and `GPIO32`
 - USB to the dashboard host
 
@@ -94,8 +94,8 @@ Important limitation:
 | Hall sensor output | `GPIO25` | Input with pull-up, active-low pulse |
 | Start/stop button | `GPIO27` | Wire button to ground |
 | SD activity LED | `GPIO26` | Optional external LED, lights during SD card access |
-| ATGM336H TX -> ESP32 RX | `GPIO16` | UART2 RX |
-| ATGM336H RX <- ESP32 TX | `GPIO17` | UART2 TX, often optional |
+| ATGM336H TX -> ESP32 RX | `GPIO17` | UART2 RX |
+| ATGM336H RX <- ESP32 TX | `GPIO16` | UART2 TX, often optional |
 | GY-BNO08X SCK (`SCL`) | `GPIO18` | Shared SPI clock |
 | GY-BNO08X MISO (`SDA`) | `GPIO19` | Shared SPI MISO |
 | GY-BNO08X MOSI (`ADO`) | `GPIO23` | Shared SPI MOSI |
@@ -121,8 +121,8 @@ Important limitation:
 | Button leg 2 | `GND` |
 | LED anode | `GPIO26` through `220 ohm` to `330 ohm` resistor |
 | LED cathode | `GND` |
-| ATGM336H `TX` | `GPIO16` |
-| ATGM336H `RX` | `GPIO17` if used |
+| ATGM336H `TX` | `GPIO17` |
+| ATGM336H `RX` | `GPIO16` if used |
 | ATGM336H `GND` | `GND` |
 | ATGM336H `VCC` | Module-rated supply |
 | GY-BNO08X `SCL` | `GPIO18` |
@@ -151,8 +151,8 @@ GPIO25  ---------------> Hall sensor OUT
 GPIO27  ----button-----> GND
 GPIO26  ----resistor---> LED anode
 GND     ---------------- LED cathode
-GPIO16  <--------------- ATGM336H TX
-GPIO17  ---------------> ATGM336H RX   (optional on some GPS boards)
+GPIO17  <--------------- ATGM336H TX
+GPIO16  ---------------> ATGM336H RX   (optional on some GPS boards)
 GPIO18  ---------------> SD SCK
 GPIO19  <--------------- SD MISO
 GPIO23  ---------------> SD MOSI
@@ -171,7 +171,7 @@ USB     ---------------- Dashboard host
 ### ESP32 Power Notes
 
 - Use an `ATGM336H` breakout that is safe with `3.3V` logic on its serial pins.
-- Do not drive `GPIO16` with a raw `5V` GPS TX line.
+- Do not drive `GPIO17` with a raw `5V` GPS TX line.
 - Many ESP32 dev boards can power an `ATGM336H` breakout from `3V3`.
 - The BNO08X silicon is a `3.3V`-class device. On a generic `GY-BNO08X` board, do not assume `VCC` is `5V` safe unless the exact breakout documentation says so.
 - The IMU and external SD adapter share the same SPI clock and data lines. They must each have their own chip-select pin.

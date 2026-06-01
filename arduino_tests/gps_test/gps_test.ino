@@ -4,16 +4,16 @@
 // Standalone ESP32 GPS test.
 //
 // Wiring used by this project:
-// - GPS TX -> ESP32 GPIO16 (UART2 RX)
-// - GPS RX -> ESP32 GPIO17 (UART2 TX, often optional)
+// - GPS TX -> ESP32 GPIO17 (UART2 RX)
+// - GPS RX -> ESP32 GPIO16 (UART2 TX, often optional)
 // - GPS GND -> ESP32 GND
 // - GPS VCC -> module-rated supply
 //
 // Open Serial Monitor at 115200 baud.
 // The GPS module is expected to output NMEA at 9600 baud.
 
-const uint8_t gpsRxPin = 16;
-const uint8_t gpsTxPin = 17;
+const uint8_t gpsRxPin = 17;
+const uint8_t gpsTxPin = 16;
 const uint32_t usbSerialBaud = 115200;
 const uint32_t gpsSerialBaud = 9600;
 
@@ -209,7 +209,7 @@ void setup() {
 
   Serial.println();
   Serial.println(F("ESP32 GPS test ready"));
-  Serial.println(F("Wiring: GPS TX -> GPIO16, GPS RX -> GPIO17 optional"));
+  Serial.println(F("Wiring: GPS TX -> GPIO17, GPS RX -> GPIO16 optional"));
   Serial.println(F("GPS UART: UART2, 9600 baud, 8N1"));
   Serial.println(F("Serial monitor: 115200 baud"));
   printHelp();
@@ -233,6 +233,6 @@ void loop() {
 
   if (!warnedNoData && now >= noDataWarningDelayMs && gpsBytesReceived < 10) {
     warnedNoData = true;
-    Serial.println(F("STATUS:NO_GPS_DATA Check power, common GND, GPS TX->GPIO16, and sky view."));
+    Serial.println(F("STATUS:NO_GPS_DATA Check power, common GND, GPS TX->GPIO17, and sky view."));
   }
 }

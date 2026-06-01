@@ -26,8 +26,8 @@
 const uint8_t hallPin = 25;
 const uint8_t buttonPin = 27;
 const uint8_t statusLedPin = 26;
-const uint8_t gpsRxPin = 16;
-const uint8_t gpsTxPin = 17;
+const uint8_t gpsRxPin = 17;
+const uint8_t gpsTxPin = 16;
 
 #define STORAGE_BACKEND_SD_SPI 1
 #define STORAGE_BACKEND_SD_MMC 2
@@ -279,7 +279,7 @@ void serviceGps() {
 
   if (!gpsWarnedNoData && millis() >= gpsNoDataWarningDelayMs && gps.charsProcessed() < 10) {
     gpsWarnedNoData = true;
-    Serial.println(F("GPS:WARN no serial data yet; check power, TX->GPIO16, and sky view."));
+    Serial.println(F("GPS:WARN no serial data yet; check power, TX->GPIO17, and sky view."));
   }
 }
 
@@ -363,7 +363,7 @@ void setup() {
   Serial.println(F("IMU:SKIPPED"));
   Serial.print(F("STORAGE_BACKEND:"));
   Serial.println(storageBackendName());
-  Serial.println(F("Pins: hall=25 button=27 led=26 gps_rx=16 gps_tx=17"));
+  Serial.println(F("Pins: hall=25 button=27 led=26 gps_rx=17 gps_tx=16"));
   Serial.println(F("Check the LED heartbeat, press the button, trigger the hall sensor, and wait for GPS."));
   printHelp();
 

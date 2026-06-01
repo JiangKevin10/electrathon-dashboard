@@ -14,8 +14,8 @@
 const uint8_t hallPin = 25;
 const uint8_t buttonPin = 27;
 const uint8_t statusLedPin = 26;
-const uint8_t gpsRxPin = 16;  // ESP32 RX  <-  GPS TX
-const uint8_t gpsTxPin = 17;  // ESP32 TX  ->  GPS RX
+const uint8_t gpsRxPin = 17;  // ESP32 RX  <-  GPS TX
+const uint8_t gpsTxPin = 16;  // ESP32 TX  ->  GPS RX
 
 const uint8_t sdSckPin = 18;
 const uint8_t sdMisoPin = 19;
@@ -42,6 +42,7 @@ volatile unsigned long lastHallPulseMillis = 0;
 portMUX_TYPE hallCountMux = portMUX_INITIALIZER_UNLOCKED;
 
 bool sdReady = false;
+unsigned long nextRaceSequence = 1;
 bool loggingState = false;
 bool lastButtonReading = HIGH;
 bool stableButtonState = HIGH;
@@ -366,8 +367,8 @@ bool startRaceLogging() {
     return false;
   }
 
-  const unsigned long nextSequence = findNextRaceSequence();
-  snprintf(currentRaceFilename, sizeof(currentRaceFilename), "R%06lu.CSV", nextSequence);
+  snprintf(currentRaceFilename, sizeof(currentRaceFilename), "R%06lu.CSV", nextRaceSequence);
+  nextRaceSequence++;
 
   char racePath[16];
   buildSdPath(racePath, sizeof(racePath), currentRaceFilename);
@@ -885,9 +886,14 @@ void setup() {
 
   Serial.println(F("DEVICE:ESP32"));
 
-  SPI.begin(sdSckPin, sdMisoPin, sdMosiPin, sdChipSelectPin);
-  if (SD.begin(sdChipSelectPin, SPI)) {
+  delay(500);
+  SPI.begin(sdSckPin, sdMisoPin, sdMosiPin);
+  pinMode(sdChipSelectPin, OUTPUT);
+  digitalWrite(sdChipSelectPin, HIGH);
+  delay(10);
+  if (SD.begin(sdChipSelectPin, SPI, 400000)) {
     sdReady = true;
+    nextRaceSequence = findNextRaceSequence();
     Serial.println(F("SD:READY"));
   } else {
     sdReady = false;
